@@ -1,37 +1,37 @@
-# Codex Session / Thread 管理机制与本地存储参考
+# Codex Session / Thread Management and Local Storage Reference
 
-[English](./03-codex-session-management.en.md) | **简体中文**
+**English** | [简体中文](./03-codex-session-management.zh-CN.md)
 
-> 目的：整理 Codex CLI / App Server 的 Session（Thread）持久化、恢复、上下文、Prompt、Token Usage、Compaction 等核心知识，并记录本项目开发过程中实际使用过的文件和方法，作为未来开发 Session 管理、远程控制、迁移、搜索、监控、统计和恢复工具时的技术参考。
+> Purpose: document the core mechanics behind Codex CLI/App Server sessions (threads), persistence, resume, prompts, context, token usage, compaction, and local files. It also records how this project actually used those artifacts while building Windows monitoring and Lark handoff, so future session-management, migration, search, monitoring, analytics, and recovery features can build on a consistent mental model.
 >
-> 本文同时包含两类信息：
+> This document combines:
 >
-> - **本项目实测**：主要基于 Windows + Codex CLI 0.155.x、独立 `CODEX_HOME` 的 rollout/status 调试结果。
-> - **Codex 公开实现 / 文档**：基于 OpenAI Codex 官方文档和 `openai/codex` 开源代码。内部持久化格式会演进，因此不要把内部字段视为永久稳定 API。
+> - **Project observations** from Windows + Codex CLI 0.155.x with an isolated `CODEX_HOME`.
+> - **Public Codex implementation/documentation** from OpenAI's Codex docs and the `openai/codex` repository. Internal storage formats can evolve and should not be treated as permanent public APIs.
 
 ---
 
-## 1. 核心术语：Thread / Session / Turn / Item
+## 1. Core Terms: Thread / Session / Turn / Item
 
-Codex 不同层使用的术语并不完全一致：
+Different Codex surfaces use slightly different terminology:
 
 ```text
-用户眼中的“一次聊天”
+What a user thinks of as "one chat"
         │
-        ├── CLI 常称 saved chat / session
-        ├── App Server 主要称 Thread
-        └── rollout 中会出现 session_id / thread_id / turn_id
+        ├── CLI often calls it a saved chat/session
+        ├── App Server primarily calls it a Thread
+        └── rollout data may contain session_id / thread_id / turn_id
 ```
 
-在本项目中，用于恢复和唯一标识长期对话的 UUID 统一称为 **Session ID**，例如：
+This project calls the persistent UUID used to identify/resume a long-lived conversation the **Session ID**, for example:
 
 ```text
 01a0beb6-d86e-70c0-8607-e4309012ba49
 ```
 
-App Server 更倾向于称它为 **Thread**。
+The App Server generally calls the same logical object a **Thread**.
 
-一个 Thread 包含多个 Turn；一个 Turn 是一次用户请求及其随后执行的工作；Turn 内又有用户消息、模型消息、命令执行、工具调用等 Item。
+A Thread contains Turns. A Turn is one user request plus the work triggered by it. A Turn contains Items such as user messages, agent messages, command execution, and tool calls.
 
 ```mermaid
 flowchart TD
@@ -44,66 +44,64 @@ flowchart TD
     B --> B4[Tool Result]
 ```
 
-本项目额外引入 **Writer / Owner** 概念：
+This project adds a separate **Writer / Owner** abstraction:
 
 ```text
-同一个 Session
+One Session
    │
    ├─ Windows Codex TUI
    └─ Lark scope
 
-任意时刻只允许一个逻辑 writer。
+Only one logical writer should own the Session at a time.
 ```
 
-这不是 Codex 自身存储格式的一部分，而是本项目为安全 handoff 增加的约束。
+That ownership layer is project-specific, not part of Codex's native persistence format.
 
 ---
 
-## 2. `CODEX_HOME`：所有本地状态的根
+## 2. `CODEX_HOME`: Root of Local State
 
-默认 Codex home 通常是：
+Default Codex state typically lives under:
 
 ```text
 ~/.codex
 ```
 
-本项目针对第三方 API Provider 使用独立目录：
+This project uses an isolated third-party provider home such as:
 
 ```text
 C:\Users\<user>\.codex-cli-thirdparty
 ```
 
-通过：
+selected through:
 
 ```powershell
 $env:CODEX_HOME = "$HOME\.codex-cli-thirdparty"
 ```
 
-隔离配置和 Session。
-
-典型目录可抽象为：
+A representative layout:
 
 ```text
 $CODEX_HOME/
 ├─ config.toml
-├─ AGENTS.md                         # 可选：全局指令
+├─ AGENTS.md
 ├─ session_index.jsonl
 ├─ sessions/
 │  └─ YYYY/MM/DD/
 │     └─ rollout-...-<SessionId>.jsonl
-├─ archived_sessions/                # 版本/客户端相关
-├─ state_*.sqlite                    # 新版 Thread metadata / state
-├─ logs_*.sqlite                     # 版本相关
-├─ memories_*.sqlite                 # 某些版本/客户端可能存在
-├─ auth.json                         # 官方登录环境可能存在
-└─ 其他 cache/runtime 文件
+├─ archived_sessions/                # version/client dependent
+├─ state_*.sqlite                    # newer thread metadata/state
+├─ logs_*.sqlite                     # version dependent
+├─ memories_*.sqlite                 # may exist in some builds/clients
+├─ auth.json                         # may exist in OpenAI-auth environments
+└─ other cache/runtime files
 ```
 
-不要假设每个版本都会出现所有文件。做工具时应采用“能力探测”而不是硬编码“目录中一定有某文件”。
+Do not assume every release exposes every file. Prefer capability detection over hard-coded presence assumptions.
 
 ---
 
-## 3. Session 数据的三个主要数据面
+## 3. Three Major Session Data Planes
 
 ```mermaid
 flowchart TD
@@ -111,51 +109,47 @@ flowchart TD
     R[sessions/.../rollout-*.jsonl] --> X
     D[state_*.sqlite] --> X
 
-    I -->|Thread name / ID 索引| X
+    I -->|Thread name / ID index| X
     R -->|Canonical event history| X
     D -->|Thread metadata / search / archive| X
 
     X --> Y[resume / search / monitor / handoff]
 ```
 
-对本项目而言：
+For this project:
 
-- `rollout-*.jsonl` 是最重要的历史事实源；
-- `session_index.jsonl` 主要用于 Thread name；
-- `state_*.sqlite` 目前没有成为核心依赖，但未来做高性能 Session Manager 很有价值。
+- rollout JSONL is the most important history source;
+- `session_index.jsonl` is especially useful for thread names;
+- `state_*.sqlite` is not yet a hard dependency, but is promising for future high-performance session management.
 
 ---
 
-## 4. `rollout-*.jsonl`：最重要的 Session 事件流
+## 4. `rollout-*.jsonl`: The Most Important Event History
 
-路径示例：
+Example:
 
 ```text
 $CODEX_HOME\sessions\2026\09\20\
 rollout-2026-09-20T05-07-30-01a0beb6-....jsonl
 ```
 
-每一行都是独立 JSON 对象。
+Each line is an independent JSON object.
 
-### 本项目实际用它做什么
-
-开发过程中，我们通过 rollout：
+### How this project used rollout data
 
 ```text
-识别新 Session
-取得 Session ID
-取得 cwd
-取得 CLI version
-取得 model / provider
-读取 approval / permission 信息
-推断 Working / Waiting
-读取 token usage / context
-观察 task_started / task_complete
+discover new sessions
+obtain Session ID
+obtain cwd
+read CLI version
+read model/provider
+read approval/permission metadata
+infer Working/Waiting
+read token/context usage
+observe task_started/task_complete
 ```
 
-### 实测常见顶层类型
-
-在 Codex CLI 0.155.x 中观察到：
+### Event types observed in Codex CLI 0.155.x
 
 ```text
 session_meta
@@ -166,7 +160,7 @@ token_usage_record
 world_state
 ```
 
-Codex 开源实现还可能持久化或使用例如：
+The Codex implementation may also persist or interpret items such as:
 
 ```text
 Compacted
@@ -176,28 +170,28 @@ RealtimeItem
 InterAgentCommunication
 ```
 
-因此解析器必须容忍未知事件：
+Parsers should therefore be forward-compatible:
 
 ```typescript
 switch (item.type) {
   case 'session_meta':
   case 'turn_context':
   case 'event_msg':
-    // parse
+    // parse known data
     break;
   default:
-    // preserve or ignore for forward compatibility
+    // preserve or ignore unknown data
     break;
 }
 ```
 
-不要把“当前见过的 event type”当成固定 schema。
+Never treat the currently observed event set as a permanent schema.
 
 ---
 
-## 5. `session_meta`：Thread 的初始身份信息
+## 5. `session_meta`: Initial Thread Identity
 
-本项目实际见过的字段包括：
+Fields observed by this project include:
 
 ```text
 session_id
@@ -215,19 +209,19 @@ context_window
 git
 ```
 
-适合回答：
+Useful questions:
 
 ```text
-这个 rollout 属于哪个 Session？
-启动时 cwd 是什么？
-CLI 版本是什么？
-Session 从哪里启动？
-初始 provider / base instructions 是什么？
+Which Session owns this rollout?
+What was the starting cwd?
+Which CLI version created it?
+Where did the Thread originate?
+What provider/base instructions were active initially?
 ```
 
-### `cwd` 特别重要
+### `cwd` is critical
 
-Handoff 至少需要保存：
+A reliable handoff needs at least:
 
 ```text
 Session ID
@@ -235,29 +229,19 @@ Session ID
 cwd
 ```
 
-因为只知道 Session ID、不知道工作目录，很容易在错误项目中继续工作。
+Resuming a valid Session ID in the wrong project directory can still produce an incorrect working environment.
 
-### `source` 也值得保留
+### Preserve `source`
 
-不同入口可能标记为 CLI、编辑器、exec 等来源。Resume picker 和 Session list 在不同版本中可能按 source 过滤，因此：
+Sessions can originate from different clients/surfaces. Pickers and lists may filter by source. The existence of a rollout file does not guarantee a default UI picker will display that thread.
 
-```text
-rollout 文件存在
-```
-
-并不等于：
-
-```text
-默认 picker 一定显示该 Thread
-```
-
-程序化恢复时，优先按稳定 Thread/Session ID。
+For programmatic recovery, stable Thread/Session ID is preferable.
 
 ---
 
-## 6. `turn_context`：每一轮的执行环境快照
+## 6. `turn_context`: Per-Turn Execution Snapshot
 
-本项目观察到：
+Observed fields include:
 
 ```text
 turn_id
@@ -276,13 +260,13 @@ personality
 collaboration...
 ```
 
-这类事件描述：
+It answers:
 
-> 这一 Turn 在什么目录、模型、权限、时间和协作模式下执行。
+> Under what model, directory, permissions, time, and collaboration mode did this Turn run?
 
-因此显示“当前 Session 状态”时不要只读最初 `session_meta`。模型、cwd、权限等可能在后续发生变化。
+Do not use only initial `session_meta` for "current session state". Settings can change later.
 
-推荐聚合策略：
+Recommended aggregation:
 
 ```text
 session_meta initial values
@@ -291,16 +275,16 @@ latest turn_context
         ↓
 latest thread_settings_applied
         ↓
-后出现的值覆盖较旧值
+newer values override older ones
 ```
 
-这也是本项目 `Watch-CodexSession.ps1` 的基本思路。
+This is the same general strategy used by this project's `Watch-CodexSession.ps1`.
 
 ---
 
-## 7. `thread_settings_applied` / Thread Settings
+## 7. `thread_settings_applied`
 
-本项目在 `event_msg` 中观察到 `thread_settings_applied`，其 settings 可包含：
+Observed inside `event_msg`, with settings such as:
 
 ```text
 model
@@ -313,13 +297,13 @@ personality
 collaboration_mode
 ```
 
-对于 status UI，这类最新 settings 往往比初始 `session_meta` 更有价值。
+For a status UI, the latest applied settings are often more useful than the initial metadata.
 
 ---
 
-## 8. `session_index.jsonl`：Thread name 的主要索引
+## 8. `session_index.jsonl`: Thread Name Index
 
-示例：
+Example:
 
 ```json
 {
@@ -329,30 +313,30 @@ collaboration_mode
 }
 ```
 
-关键特征：
+Important behavior:
 
 ```text
 append-only
-同一个 Session ID 可能出现多条 rename 记录
-最新 updated_at / 最后 append 的记录 wins
+one Session ID may have multiple rename records
+latest updated_at / latest append wins
 ```
 
-错误做法：
+Wrong:
 
 ```text
-找到第一个相同 ID 就停止
+stop at the first matching Session ID
 ```
 
-正确做法：
+Correct:
 
 ```text
-扫描所有相同 ID
-→ 选最新记录
+scan all records for that ID
+→ choose the latest
 ```
 
-Windows PowerShell 5.1 读取包含中文 Thread name 的文件时应显式使用 UTF-8，避免乱码。
+On Windows PowerShell 5.1, read it explicitly as UTF-8 to avoid mojibake for non-ASCII names.
 
-本项目中：
+In this project:
 
 ```text
 rollout
@@ -364,59 +348,51 @@ session_index.jsonl
 
 ---
 
-## 9. `state_*.sqlite`：未来 Session Manager 最值得关注的数据源
+## 9. `state_*.sqlite`: Important for Future Session Managers
 
-本项目目前没有把它作为必须依赖，但新版 Codex 越来越多的 Thread metadata、搜索、归档、列表能力会借助状态数据库。
+This project does not currently require the state DB, but newer Codex clients increasingly rely on a state database for thread metadata, search, archive state, and listing behavior.
 
-适合未来开发：
+Potential future uses:
 
 ```text
-高性能 /sessions
-几百 / 几千 Thread 搜索
-分页
-按 cwd / source / provider 筛选
-Archived Session
-Thread title / preview
-快速 Recent 列表
+high-performance /sessions
+hundreds/thousands of Thread searches
+pagination
+filters by cwd/source/provider
+archived sessions
+thread title/preview
+fast Recent lists
 ```
 
-### 为什么当前没有直接依赖
-
-因为：
+### Why it is not a hard dependency today
 
 ```text
 rollout + session_index
 ```
 
-已经足够支持：
+already provide enough information for:
 
 ```text
 Windows discovery
 Observer
-Thread name
+thread names
 cwd
 model
 usage
 handoff
 ```
 
-而直接绑定内部 SQLite schema 会提高版本耦合。
+Direct coupling to internal SQLite schemas increases upgrade risk.
 
-### 建议
+### Recommendation
 
-优先：
-
-```text
-read-only
-```
-
-避免直接手工修改 SQLite。Rollout、index、state DB 可能互为 canonical history 与投影；修改其中一个可能制造漂移。
+Prefer read-only access. Avoid manually writing the DB unless the current Codex schema and synchronization rules are fully understood.
 
 ---
 
-## 10. Prompt 不是“一个字符串”
+## 10. A Prompt Is Not One String
 
-一次模型调用实际上下文更接近多层组合：
+A model request is better understood as layered context:
 
 ```mermaid
 flowchart TD
@@ -429,78 +405,66 @@ flowchart TD
     G[Tool Results / Environment State] --> M
 ```
 
-因此要做 Prompt Inspector 时，不要简单认为：
-
-```text
-user prompt + assistant response
-```
-
-就是模型真正看到的全部 context。
+A Prompt Inspector should not assume "user prompt + assistant response" is the complete model input.
 
 ---
 
 ## 11. Base / System Instructions
 
-本项目在 `session_meta` 中实际见到：
+This project observed:
 
 ```text
 base_instructions
 ```
 
-它适合调试：
+inside `session_meta`.
+
+It can help answer:
 
 ```text
-这个 Session 启动时使用了什么基础指令？
-不同 Codex 版本 / 模式的基础 prompt 是否变化？
+Which base instructions were active at session creation?
+Did a Codex version/mode change the base prompt?
 ```
 
-但它不一定代表模型完整的所有 system/developer input。
-
-实际模型上下文还可能包括：
+But it should not be treated as the complete set of system/developer context. Additional inputs may include:
 
 ```text
 AGENTS.md
-开发者指令
-sandbox / permissions
+developer instructions
+sandbox/permission instructions
 tool schemas
-动态环境信息
-历史消息
-compaction summary
+dynamic environment state
+history
+compaction summaries
 ```
 
 ---
 
-## 12. `AGENTS.md`：长期项目指令
+## 12. `AGENTS.md`: Persistent Project Instructions
 
-Codex 官方支持分层指令发现：
+Codex officially supports a layered discovery model including:
 
 ```text
 $CODEX_HOME/AGENTS.md
-项目根 AGENTS.md
-子目录 AGENTS.md / AGENTS.override.md
+repository-root AGENTS.md
+nested AGENTS.md / AGENTS.override.md
 ```
 
-从项目根到 cwd 逐层合并，越靠近当前目录的规则越晚出现，因此优先级更高。
+Instructions are assembled from the project root toward the current working directory, with more local rules appearing later and therefore taking precedence.
 
-适合写：
+Good uses:
 
 ```text
-测试命令
-代码风格
-仓库约束
-部署约定
-团队 workflow
+test commands
+coding style
+repository constraints
+deployment rules
+team workflow
 ```
 
-不适合把一次性 Session 状态塞进 AGENTS。
+Do not use AGENTS as a dumping ground for one-off session state.
 
-Session 工具若要解释：
-
-```text
-为什么相同 user prompt 在两个目录行为不同？
-```
-
-应同时检查：
+If two identical user prompts behave differently, inspect both:
 
 ```text
 cwd
@@ -510,21 +474,21 @@ AGENTS instruction chain
 
 ---
 
-## 13. User Prompt、Response Item 与 Transcript
+## 13. User Prompts, Response Items, and Transcript Reconstruction
 
-普通用户输入和模型/工具输出最终会形成 Session history 中的 item/event。
+User input and assistant/tool output are represented as session items/events.
 
-`response_item` 可能表示：
+`response_item` may correspond to:
 
 ```text
-assistant message
-tool / function interaction
-Responses API item
+assistant messages
+tool/function interactions
+Responses API items
 ```
 
-Rollout 是机器事件日志，不是可直接展示的 Markdown 聊天记录。
+A rollout is a machine event log, not a ready-to-display Markdown transcript.
 
-构建 transcript 时应：
+Build a transcript through:
 
 ```text
 RolloutItem
@@ -535,43 +499,43 @@ RolloutItem
 
 ---
 
-## 14. Reasoning 与私有推理边界
+## 14. Reasoning and Private-Reasoning Boundaries
 
-未来做 Session Inspector 时应区分：
+A session inspector should distinguish:
 
 ```text
-持久化事件
-≠ 模型看到的全部上下文
-≠ 可以展示给用户的全部内容
+persisted events
+≠ complete model-visible context
+≠ content suitable for user display
 ```
 
-可以稳定依赖的通常是：
+Stable product features should rely on:
 
 ```text
 user messages
-assistant messages / finals
-tool calls / results
+assistant messages/finals
+tool calls/results
 turn metadata
-reasoning summary（如果支持）
-compaction summary
+reasoning summaries (when supported)
+compaction summaries
 ```
 
-不要把功能设计建立在“完整内部 chain-of-thought 必然以明文存储”这一假设上。
+Do not assume full internal chain-of-thought is persisted in plaintext or should be exposed.
 
 ---
 
 ## 15. Context Compaction
 
-长 Session 不会无限把全部历史原样送入模型。
+Long sessions do not indefinitely resend the full raw history.
 
-Codex 支持：
+Codex supports:
 
 ```text
 /compact
 automatic compaction
 ```
 
-Compaction 的作用可以理解为：
+Conceptually:
 
 ```mermaid
 flowchart LR
@@ -581,102 +545,100 @@ flowchart LR
     H --> R[Persisted Rollout]
 ```
 
-关键区别：
+Key distinction:
 
 ```text
-磁盘上的完整历史
+full history persisted on disk
 ```
 
-与：
+is not the same as:
 
 ```text
-下一轮真正送给模型的有效上下文
+effective context sent to the model on the next turn
 ```
 
-不是同一件事。
-
-未来做 Session replay 时，不应该简单把 rollout 每一行重新拼回模型，而应尽量遵循 Codex 自己的 context reconstruction 语义。
+A replay tool should not blindly concatenate every rollout line into a future model request.
 
 ---
 
-## 16. `Compacted` / `RetainedContext` / `WorldState`
+## 16. `Compacted`, `RetainedContext`, and `WorldState`
 
-这些事件/结构对高级 Session 工具很重要。
+These are important for advanced tools.
 
-### Compacted
+### `Compacted`
 
-表示历史发生了 context compaction。
+Signals that historical context was compacted.
 
-### RetainedContext
+### `RetainedContext`
 
-表示 compact 后仍需要保留给后续模型调用的有效上下文。
+Represents context retained for future model calls after compaction.
 
-### WorldState
+### `WorldState`
 
-与工作区、环境状态或恢复所需状态有关。
+Relates to environment/workspace state used by persistence or reconstruction.
 
-对未来开发的启示：
+Main lesson:
 
-> “查看完整历史”和“恢复模型 context”必须分开设计。
+> "Show full history" and "reconstruct model context" are two different problems.
 
 ---
 
-## 17. Context Window 与自动压缩阈值
+## 17. Context Window and Auto-Compaction Thresholds
 
-Codex 配置支持类似：
+Codex configuration supports values such as:
 
 ```toml
 model_context_window = 128000
 model_auto_compact_token_limit = 64000
 ```
 
-如果没有显式配置，Codex 会根据 model metadata 使用默认值。
+If omitted, model metadata/defaults are used.
 
-不要在外部工具中硬编码：
+External tools should not hard-code assumptions like:
 
 ```text
-某模型一定 128K
-某比例一定触发 compact
+this model is always 128K
+compaction always happens at exactly X%
 ```
 
-模型和 Codex 版本都会变化。
+Both models and Codex implementations evolve.
 
 ---
 
-## 18. Context 百分比：不要简单做 `used / total`
+## 18. Context Percentage: Do Not Simply Compute `used / total`
 
-开发本项目时曾观察：
+During this project, a rollout could show approximately:
 
 ```text
-rollout token usage ≈ 13.7K
-context window ≈ 258K
+13.7K tokens
+258K context window
 ```
 
-简单除法会得到约：
+A simple ratio suggests roughly:
 
 ```text
 95% left
 ```
 
-但 Codex TUI 有时显示接近：
+while Codex TUI may display a value closer to:
 
 ```text
 99% left
 ```
 
-原因之一是 Codex UI/context accounting 可能扣除固定或模型相关 baseline、使用不同的 current-context 口径，且 compaction 后还可能重新估算 context usage。
+Codex UI/context accounting can apply a different effective-window/baseline model, and compaction may trigger a context recomputation.
 
-因此：
+Therefore:
 
-> 如果目标是与 Codex `/status` 完全一致，不要只用 `thread cumulative tokens / context window`。
+> If exact parity with Codex `/status` matters, do not derive the percentage solely from cumulative thread usage divided by context window.
 
-应尽量复用当前 Codex 版本的 context accounting 逻辑。
+Reuse the current Codex accounting logic when possible.
 
 ---
 
 ## 19. `token_usage_record`
 
-本项目实际观察到：
+Observed fields include:
 
 ```text
 thread_id
@@ -689,7 +651,7 @@ turn_token_usage
 thread_token_usage
 ```
 
-常见 usage 维度：
+Typical usage dimensions:
 
 ```text
 input_tokens
@@ -699,37 +661,37 @@ reasoning_output_tokens
 total_tokens
 ```
 
-可以同时存在：
+The same record family can expose:
 
 ```text
-本次响应 usage
-当前 Turn 累计
-整个 Thread 累计
+response usage
+turn cumulative usage
+thread cumulative usage
 ```
 
 ---
 
-## 20. Context Usage、累计 Usage、Billing 是三件不同的事
+## 20. Current Context, Cumulative Usage, and Billing Are Different
 
-非常重要：
+This distinction is essential:
 
 ```text
-当前有效 Context
-≠ Thread 累计 token
-≠ API 最终账单
+current effective context
+≠ thread cumulative tokens
+≠ final API bill
 ```
 
-例如 Thread 累计 1M token，并不意味着当前模型上下文里还有 1M token；长历史可能已经 compact。
+A thread can accumulate millions of tokens over many turns while the current model context is much smaller because of compaction.
 
-反过来，当前 context 50K，也不能推导整个 Thread 只花了 50K。
+Conversely, a 50K current context does not mean the thread only consumed 50K tokens overall.
 
 ---
 
-## 21. Token Usage 与费用估算
+## 21. Token Usage and Cost Estimation
 
-Rollout usage 可以用于 **估算**，但不能单独当作最终账单。
+Rollout usage can support **estimates**, not necessarily an authoritative invoice.
 
-通常需要：
+A cost estimator needs:
 
 ```text
 input
@@ -741,21 +703,7 @@ service tier
 provider-specific pricing
 ```
 
-第三方 Provider 尤其应把：
-
-```text
-Usage
-```
-
-和：
-
-```text
-Pricing
-```
-
-分离。
-
-推荐数据模型：
+Third-party providers especially require usage and pricing to be separated:
 
 ```text
 TokenUsageRecord
@@ -769,37 +717,37 @@ Price Table
 Estimated Cost
 ```
 
-如果使用 OpenAI API，可参考官方 Pricing；第三方 Provider 应使用其自己的账单规则。
+Use OpenAI's pricing page only for OpenAI-billed traffic; third-party providers may price differently.
 
 ---
 
-## 22. Rate Limit / Quota 也不是 Token Usage
+## 22. Rate Limits / Quota Are Also Separate
 
-未来做 Dashboard 时至少区分：
+A dashboard should distinguish:
 
 ```text
 Context Window
 Current Context Usage
 Thread Cumulative Usage
-Estimated Billing Cost
+Estimated Cost
 Rate Limit
 Subscription / Provider Quota
 ```
 
-不要因为“Context 90% left”就显示“API quota 90% left”。
+"Context 90% left" does not imply "API quota 90% left."
 
 ---
 
-## 23. Resume：优先保存 Thread / Session ID
+## 23. Resume: Persist Stable Thread/Session ID
 
-CLI 支持：
+CLI supports:
 
 ```text
 codex resume
 codex resume <Thread-ID>
 ```
 
-App Server 支持：
+App Server exposes:
 
 ```text
 thread/start
@@ -809,27 +757,27 @@ thread/read
 thread/list
 ```
 
-官方 App Server 文档明确把 Thread 作为核心原语。
+The App Server documentation treats the Thread as the primary conversation primitive.
 
-对 handoff 工具，最低限度应保存：
+For handoff metadata, preserve at minimum:
 
 ```text
 Session / Thread ID
 cwd
 ```
 
-Rollout path 可以做诊断和 fallback，但不要让普通恢复流程过度依赖文件路径。
+A rollout path can be diagnostic/fallback metadata, but normal recovery should not depend too heavily on a filesystem path.
 
 ---
 
-## 24. Resume 与 Fork 的区别
+## 24. Resume vs Fork
 
 ```text
 resume
-→ 在原 Thread 上继续追加
+→ continue appending to the original Thread
 
 fork
-→ 从已有历史派生一个新 Thread ID
+→ derive a new Thread ID from existing history
 ```
 
 ```mermaid
@@ -838,28 +786,22 @@ flowchart LR
     A -->|fork| B[Thread B]
 ```
 
-未来如果需要：
-
-```text
-让 Lark 从当前 Session 开一个实验分支
-```
-
-应优先考虑 fork，而不是复制 rollout 文件。
+If a future Lark feature needs an experimental branch from the current session, use fork semantics rather than copying rollout files.
 
 ---
 
-## 25. Read / List：未来比直接扫文件更稳定的方向
+## 25. `thread/read` / `thread/list`: A Better Long-Term Direction
 
-Codex App Server 已提供：
+Codex App Server already provides:
 
 ```text
 thread/read
 thread/list
 ```
 
-它们可以在不 resume 的情况下读取 Thread metadata / history。
+which can inspect stored threads without resuming them.
 
-未来本项目如果从“本地脚本式 Session Manager”进一步产品化，值得优先评估：
+For a productized remote Session Manager, consider moving toward:
 
 ```text
 Bridge
@@ -868,22 +810,29 @@ Bridge
 → thread/resume
 ```
 
-而不是无限增加对内部 rollout/schema 的直接依赖。
+rather than continuously increasing direct dependencies on internal rollout/state schemas.
+
+Direct rollout parsing remains valuable for:
+
+```text
+debugging
+forensics
+custom analytics
+compatibility fallback
+```
 
 ---
 
 ## 26. Archive
 
-新版 Codex 还支持 archive/unarchive，并可能在：
+Newer Codex flows support archive/unarchive behavior and may reflect it in:
 
 ```text
 archived_sessions
 state DB
 ```
 
-中体现。
-
-未来 `/sessions` 可扩展：
+Future commands could expose:
 
 ```text
 /sessions active
@@ -891,28 +840,28 @@ state DB
 /sessions all
 ```
 
-本项目当前未将 archive 作为核心功能。
+This project does not currently rely on archive metadata.
 
 ---
 
-## 27. 新启动 Codex 为什么有时还没有 Session
+## 27. Why a Newly Opened Codex TUI May Not Yet Be a Session
 
-开发过程中确认：
+During development we confirmed that immediately after:
 
 ```text
 codex3
 ```
 
-刚启动 TUI，但用户尚未真正产生持久化交互时，可能只有：
+there may be only:
 
 ```text
 Windows process
 LaunchId
 cwd
-Owner PowerShell PID
+owner PowerShell PID
 ```
 
-而我们的正式 Session inventory 需要：
+while a discoverable persistent session still needs:
 
 ```text
 Session ID
@@ -920,7 +869,7 @@ rollout
 session/index metadata
 ```
 
-所以应区分：
+A useful lifecycle model is:
 
 ```text
 Pending Launch
@@ -932,11 +881,11 @@ Active Writer
 Detached / Archived
 ```
 
-这解释了“Codex 窗口已经打开，但 `/sessions` 暂时没有”的情况。
+This explains why a visible Codex window may not immediately appear in `/sessions`.
 
 ---
 
-## 28. 本项目如何使用这些文件
+## 28. How This Project Uses the Files
 
 ```mermaid
 flowchart TD
@@ -957,7 +906,7 @@ flowchart TD
 
 ### Attach
 
-使用：
+Uses:
 
 ```text
 process
@@ -966,21 +915,21 @@ launch time
 rollout session_meta
 ```
 
-发现 Session。
+to discover a persistent session.
 
 ### Observer
 
-读取：
+Uses:
 
 ```text
 rollout + session_index
 ```
 
-生成轻量 status projection。
+to build a lightweight status projection.
 
 ### `/sessions`
 
-聚合：
+Combines:
 
 ```text
 session_index
@@ -989,25 +938,23 @@ Windows monitor
 Lark SessionStore
 ```
 
-显示 owner / project / thread / cwd。
+to present thread/project/owner/cwd information.
 
 ---
 
-## 29. 为什么不应让 `/sessions` 每次完整扫描全部 rollout
+## 29. Why `/sessions` Should Not Fully Replay Every Rollout
 
-大 Session 的 rollout 会越来越大。
+Large session rollouts can become very large.
 
-错误架构：
+Bad architecture:
 
 ```text
-每一次 /sessions
-→ 遍历全部 Session
-→ 从头 parse 所有 JSONL
+every /sessions call
+→ walk every session
+→ parse every JSONL file from beginning to end
 ```
 
-随着 Session 数增加会越来越慢。
-
-推荐：
+Recommended:
 
 ```text
 Canonical history:
@@ -1023,35 +970,33 @@ UI:
 sessions command
 ```
 
-也就是说：
-
-> rollout 是事实源，但列表 UI 应尽量读取索引和投影。
+The rollout is the historical source of truth, but list UIs should prefer indexes and projections.
 
 ---
 
-## 30. 推荐的 Session Manager 分层读取策略
+## 30. Recommended Layered Read Strategy
 
-### Level 1：Inventory
+### Level 1: Inventory
 
-读取：
+Read:
 
 ```text
 session_index
-rollout filename
-mtime / state DB
+rollout filenames
+mtime/state DB
 ```
 
-得到：
+for:
 
 ```text
 Session ID
 Thread name
-更新时间
+rough update time
 ```
 
-### Level 2：Metadata
+### Level 2: Metadata
 
-只读取 rollout 前部 `session_meta`：
+Read only early `session_meta`:
 
 ```text
 cwd
@@ -1060,54 +1005,54 @@ CLI version
 source
 ```
 
-### Level 3：Live Monitoring
+### Level 3: Live Monitoring
 
-tail rollout：
+Tail rollout for:
 
 ```text
-task started / complete
+task started/complete
 settings
 token usage
 ```
 
-得到：
+to derive:
 
 ```text
-Working / Waiting
+Working/Waiting
 model
 context
 ```
 
-### Level 4：Full Transcript / Analytics
+### Level 4: Full Transcript / Analytics
 
-完整 replay rollout，用于：
+Replay full rollout for:
 
 ```text
-聊天历史
-tool 调用分析
-token/cost analytics
+conversation history
+tool-call analytics
+token/cost analysis
 debugging
 ```
 
-不要让 Level 4 成为默认 inventory 路径。
+Do not make Level 4 the default inventory path.
 
 ---
 
-## 31. Ownership：Codex 原生 Session 之上的额外层
+## 31. Ownership: An Extra Layer Above Native Codex Persistence
 
-Codex 的持久化本身并不会自动保证：
+Codex persistence alone does not guarantee that:
 
 ```text
 Windows
 Lark
 Desktop
 VS Code
-其他机器
+another machine
 ```
 
-不会同时操作同一个 Thread。
+will not concurrently write to the same Thread.
 
-因此本项目额外维护：
+This project therefore tracks:
 
 ```text
 Windows
@@ -1116,7 +1061,7 @@ Detached
 Unknown / Unmanaged
 ```
 
-### 当前判断来源
+using evidence such as:
 
 ```text
 Observer heartbeat
@@ -1125,37 +1070,26 @@ Release Agent
 Lark SessionStore binding
 ```
 
-### 一个重要边界
+Important limitation:
 
-“没有 monitor 证据”不能严格证明“Session 没有 Windows TUI”。
+> Absence of monitor evidence does not prove the absence of a Windows TUI.
 
-因此旧 Session 可能应显示：
-
-```text
-Unknown / Unmanaged
-```
-
-而不是简单：
-
-```text
-Detached
-```
+An older unmanaged session can therefore be `Unknown / Unmanaged`, not truly Detached.
 
 ---
 
-## 32. 未来建议升级为显式 Lease
+## 32. Future Upgrade: Explicit Ownership Lease
 
-如果未来扩展到：
+For multi-machine or multi-client expansion:
 
 ```text
-多台电脑
 Telegram
-Web Dashboard
+Web dashboard
 SSH
-Mobile client
+mobile app
 ```
 
-建议建立显式 ownership lease：
+an explicit lease model is recommended:
 
 ```json
 {
@@ -1168,7 +1102,7 @@ Mobile client
 }
 ```
 
-这样可以实现：
+This enables:
 
 ```text
 Acquire
@@ -1178,113 +1112,106 @@ Force-expire
 Owner conflict detection
 ```
 
-比通过多个运行时文件间接推断更稳健。
+and is more robust than inferring ownership from multiple runtime artifacts.
 
 ---
 
-## 33. 未来推荐优先考虑 App Server，而不是继续扩大内部文件耦合
+## 33. Prefer App Server for Future Productization
 
-如果未来要把本项目做成真正的远程 Codex Session Manager，建议逐步评估：
-
-```text
-Codex App Server
-├─ thread/list
-├─ thread/read
-├─ thread/resume
-├─ thread/fork
-├─ thread/archive
-└─ turn/start / interrupt
-```
-
-优势：
+If this project evolves into a general remote Codex Session Manager, evaluate Codex App Server as the primary integration layer:
 
 ```text
-由 Codex 自己解释内部存储
-schema 演进风险更低
-可以获得 runtime thread status
-更适合分页和搜索
+thread/list
+thread/read
+thread/resume
+thread/fork
+thread/archive
+turn/start
+turn/interrupt
 ```
 
-内部 rollout parser 仍然适合：
+Advantages:
 
 ```text
-debugging
-forensics
-额外 analytics
-版本兼容 fallback
+Codex interprets its own storage
+lower internal-schema coupling
+runtime Thread status
+built-in pagination/search
 ```
+
+Keep rollout parsing for diagnostics and specialized analytics.
 
 ---
 
-## 34. 开发新 Session 功能时的检查清单
+## 34. Checklist for New Session Features
 
-建议每个新功能先回答：
+Before implementing a feature, ask:
 
-1. 这是 **Thread metadata** 还是 **live runtime state**？
-2. 事实源应该是 rollout、index、state DB 还是 App Server？
-3. 是否需要完整 history，还是只需要 metadata？
-4. 是否会修改 Session？如果会，是否可能产生双 writer？
-5. 是否正确处理 compaction？
-6. 是否区分 current context 与 cumulative token usage？
-7. 是否假设了某个内部 event/schema 永远不变？
-8. 是否能容忍旧 Session 缺字段？
-9. 是否能处理 rename / archive / resume / fork？
-10. 是否把 Provider-specific billing 与 Token Usage 解耦？
+1. Is this **Thread metadata** or **live runtime state**?
+2. Should the source be rollout, session index, state DB, or App Server?
+3. Do I need full history or just metadata?
+4. Can this operation modify a Session and create a dual-writer race?
+5. Does it handle compaction correctly?
+6. Does it distinguish current context from cumulative token usage?
+7. Is it assuming an internal event/schema will never change?
+8. Can it tolerate old sessions with missing fields?
+9. Can it handle rename/archive/resume/fork?
+10. Is provider-specific pricing separated from token usage?
 
 ---
 
-## 35. 核心参考链接
+## 35. Core References
 
-### OpenAI 官方 Codex 文档
+### Official OpenAI Codex Documentation
 
-- Codex CLI：  
+- Codex CLI:  
   https://developers.openai.com/codex/cli
-- Codex App Server / Thread API：  
+- Codex App Server / Thread API:  
   https://developers.openai.com/docs/app-server
-- Codex 配置参考：  
+- Configuration reference:  
   https://developers.openai.com/docs/config-file/config-reference
-- Codex 示例配置：  
+- Configuration sample:  
   https://developers.openai.com/docs/config-file/config-sample
-- `AGENTS.md` 指令机制：  
+- `AGENTS.md` instruction discovery:  
   https://developers.openai.com/docs/agent-configuration/agents-md
-- Codex customization overview：  
+- Codex customization overview:  
   https://developers.openai.com/docs/customization/overview
 
-### OpenAI Codex 开源仓库
+### OpenAI Codex Source
 
-- GitHub：  
+- GitHub:  
   https://github.com/openai/codex
-- 源码检索关键词建议：  
+- Useful source-search terms:  
   `RolloutRecorder`, `SessionIndex`, `ThreadManager`, `TokenUsage`, `Compacted`, `RetainedContext`, `ModelContext`, `thread/resume`
 
 ### Pricing
 
-- OpenAI API Pricing：  
+- OpenAI API Pricing:  
   https://developers.openai.com/api/docs/pricing
 
-### 本项目相关文档
+### Project Documentation
 
-- [Codex 第三方 API Key](./01-codex-third-party-api-key.md)
-- [Lark / Bridge / Codex 架构](./02-lark-bridge-codex-architecture.md)
-- [根 README](../README.md)
+- [Third-Party Codex API Key](./01-codex-third-party-api-key.md)
+- [Lark / Bridge / Codex Architecture](./02-lark-bridge-codex-architecture.md)
+- [Root README](../README.md)
 
 ---
 
-## 36. 总结
+## 36. Summary
 
-未来开发 Session 工具时，最重要的几个结论是：
+The most important rules for future session tooling are:
 
 ```text
-Session / Thread ID 是核心身份
-cwd 是恢复工作上下文的关键元数据
-rollout 是最重要的历史事实源
-session_index 适合名称索引
-state DB 适合高性能查询，但内部 schema 可能演进
-完整历史 ≠ 当前模型 context
-累计 token ≠ 当前 context ≠ 最终账单
-compaction 是恢复语义的一部分
-unknown event 必须 forward-compatible
-一个 Session 同一时间只应有一个 writer
+Session / Thread ID is the primary identity
+cwd is critical recovery metadata
+rollout is the main historical event source
+session_index is useful for names/indexing
+state DB is useful for fast queries but its internal schema can evolve
+full history != current model context
+cumulative tokens != current context != final billing
+compaction is part of recovery semantics
+unknown events must be handled forward-compatibly
+one Session should have only one logical writer at a time
 ```
 
-对于本项目，当前的 Windows Observer + Release Agent + Lark SessionStore 已经形成了一个可用的 ownership 层；后续如果继续扩展，最值得投资的方向是 **显式 Lease + Codex App Server integration**。
+For this project, Windows Observer + Release Agent + Lark SessionStore already form a usable ownership layer. The most valuable future directions are **explicit ownership leases** and **Codex App Server integration**.

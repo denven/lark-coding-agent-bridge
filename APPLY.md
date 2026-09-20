@@ -1,30 +1,40 @@
-# 应用到现有仓库
+# Applying These Documentation Files to an Existing Repository
 
-压缩包中的目录结构：
+**English** | [简体中文](./APPLY.md)
+
+The package uses this repository-ready structure:
 
 ```text
+README.zh-CN.md
 README.md
 README.upstream.md
+APPLY.md
+APPLY.en.md
 local-docs/
+├─ README.zh-CN.md
 ├─ README.md
+├─ 01-codex-third-party-api-key.zh-CN.md
 ├─ 01-codex-third-party-api-key.md
-└─ 02-lark-bridge-codex-architecture.md
+├─ 02-lark-bridge-codex-architecture.zh-CN.md
+├─ 02-lark-bridge-codex-architecture.md
+├─ 03-codex-session-management.zh-CN.md
+└─ 03-codex-session-management.md
 ```
 
-如果你要保留当前本地仓库的原 `README.md`，建议先在仓库中执行：
+Before replacing the repository README, preserve the current upstream/local README:
 
 ```powershell
-git mv README.md README.upstream.md
+git mv README.zh-CN.md README.upstream.md
 ```
 
-然后把压缩包中的新 `README.md` 和 `local-docs` 复制到仓库。
+Then copy the new `README.zh-CN.md`, `README.md`, and `local-docs/` into the repository.
 
-如果你的当前 `README.md` 与上游最新版本存在本地修改，请保留 `git mv` 后得到的那一份 `README.upstream.md`，不要用压缩包中的 `README.upstream.md` 覆盖它。
+If your existing README already contains local changes, keep the file produced by `git mv`; do not overwrite it with the packaged `README.upstream.md`.
 
-完成后：
+Stage and inspect:
 
 ```powershell
-git add README.md README.upstream.md local-docs
+git add README.zh-CN.md README.md README.upstream.md APPLY.md APPLY.en.md local-docs
 git status --short
 git diff --cached
 ```

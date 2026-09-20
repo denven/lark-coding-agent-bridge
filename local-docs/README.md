@@ -1,24 +1,24 @@
 # Local Documentation
 
-[English](./README.en.md) | **简体中文**
+**English** | [简体中文](./README.zh-CN.md)
 
-本目录保存本 fork / 本地增强版特有的运维、架构和 Codex Session 机制说明。
+This directory contains documentation specific to this local fork/extension.
 
-## 文档
+## Documents
 
-1. [Codex 使用第三方 API Key](./01-codex-third-party-api-key.md)  
-   [English](./01-codex-third-party-api-key.en.md)
+1. [Using a Third-Party API Key with Codex](./01-codex-third-party-api-key.md)  
+   [简体中文](./01-codex-third-party-api-key.zh-CN.md)
 
-2. [Lark、lark-channel-bridge 与 Codex 的架构和运行机制](./02-lark-bridge-codex-architecture.md)  
-   [English](./02-lark-bridge-codex-architecture.en.md)
+2. [Lark, lark-channel-bridge, and Codex Architecture](./02-lark-bridge-codex-architecture.md)  
+   [简体中文](./02-lark-bridge-codex-architecture.zh-CN.md)
 
-3. [Codex Session / Thread 管理机制与本地存储参考](./03-codex-session-management.md)  
-   [English](./03-codex-session-management.en.md)
+3. [Codex Session / Thread Management and Local Storage Reference](./03-codex-session-management.md)  
+   [简体中文](./03-codex-session-management.zh-CN.md)
 
-## 与根 README 的关系
+## Relationship to the Root README
 
-根目录 [README.md](../README.md) 用于日常安装、编译、使用、升级和命令说明。
+[README.md](../README.md) is the local project's English installation/usage/upgrade guide.
 
-[README.en.md](../README.en.md) 是同一份本地 README 的英文版。
+[README.zh-CN.md](../README.zh-CN.md) is the Simplified Chinese version.
 
-[README.upstream.md](../README.upstream.md) 保存上游原始 README，便于升级时比较本地修改和 upstream 行为。
+[README.upstream.md](../README.upstream.md) preserves the upstream README for upgrade comparison.

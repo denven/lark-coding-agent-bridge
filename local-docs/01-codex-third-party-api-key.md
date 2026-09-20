@@ -1,34 +1,34 @@
-# Codex 使用第三方 API Key
+# Using a Third-Party API Key with Codex
 
-[English](./01-codex-third-party-api-key.en.md) | **简体中文**
+**English** | [简体中文](./01-codex-third-party-api-key.zh-CN.md)
 
-本文描述如何在 Windows 中为 Codex CLI 配置一个独立的第三方 API Provider，并避免与官方 Codex / ChatGPT 登录环境互相污染。
+This document describes how to configure an isolated third-party API provider for Codex CLI on Windows without interfering with the default/OpenAI Codex environment.
 
-> 示例中的 Provider 名、模型名和 URL 仅用于说明。不要把真实 API Key 写入 Git。
+> Provider names, model names, and URLs below are examples. Never commit a real API key.
 
 ---
 
-## 1. 推荐架构
+## 1. Recommended Layout
 
-使用独立 `CODEX_HOME`：
+Use a separate `CODEX_HOME`:
 
 ```text
-Official / default Codex
+Default Codex
 %USERPROFILE%\.codex
 
 Third-party Codex
 %USERPROFILE%\.codex-cli-thirdparty
 ```
 
-这样可以隔离：
+This isolates:
 
-- `config.toml`
-- session / rollout
-- provider 配置
-- thread index
-- 其他 Codex 本地状态
-
-逻辑如下：
+```text
+config.toml
+sessions / rollout
+provider settings
+thread index
+other local Codex state
+```
 
 ```mermaid
 flowchart LR
@@ -41,15 +41,9 @@ flowchart LR
 
 ---
 
-## 2. 设置 API Key
+## 2. Store the API Key in a User Environment Variable
 
-例如 Provider 使用：
-
-```text
-REQUEST_ME_API_KEY
-```
-
-永久写入当前 Windows 用户环境变量：
+Example:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -59,15 +53,13 @@ REQUEST_ME_API_KEY
 )
 ```
 
-新开的 PowerShell 会读取该环境变量。
-
-验证：
+Verify from a newly opened shell:
 
 ```powershell
 Test-Path Env:REQUEST_ME_API_KEY
 ```
 
-如果当前窗口是在设置变量之前已经打开，可以重新打开 PowerShell，或者临时加载：
+If the current shell predates the change:
 
 ```powershell
 $env:REQUEST_ME_API_KEY =
@@ -77,34 +69,25 @@ $env:REQUEST_ME_API_KEY =
     )
 ```
 
-不要执行：
-
-```powershell
-Write-Host $env:REQUEST_ME_API_KEY
-```
-
-到共享日志或截图中。
+Do not print the key into shared logs or screenshots.
 
 ---
 
-## 3. 配置独立 CODEX_HOME
+## 3. Configure the Isolated `CODEX_HOME`
 
-创建目录：
+Create it:
 
 ```powershell
-New-Item `
-    -ItemType Directory `
-    -Force `
-    "$HOME\.codex-cli-thirdparty"
+New-Item -ItemType Directory -Force "$HOME\.codex-cli-thirdparty"
 ```
 
-配置文件：
+Configuration file:
 
 ```text
 %USERPROFILE%\.codex-cli-thirdparty\config.toml
 ```
 
-示例：
+Example:
 
 ```toml
 model_provider = "aipor"
@@ -119,55 +102,43 @@ wire_api = "responses"
 env_key = "REQUEST_ME_API_KEY"
 ```
 
-含义：
+Important fields:
 
 ```text
-model_provider       选择下面定义的 provider
-model                Provider 暴露的模型名
+model_provider       Provider selected from [model_providers]
+model                Model name exposed by that provider
 model_reasoning_effort
-                     Codex 请求的 reasoning effort
-base_url             第三方 API endpoint
-wire_api             当前示例使用 Responses API 线协议
-env_key              Codex 从哪个环境变量取 API Key
+                     Requested reasoning effort
+base_url             Third-party endpoint
+wire_api             Example uses the Responses API wire protocol
+env_key              Environment variable containing the API key
 ```
-
-OpenAI Codex 的配置实现和公开示例支持自定义 model provider、`base_url`、`env_key` 和 `wire_api`。
 
 ---
 
-## 4. 关于 requires_openai_auth
+## 4. `requires_openai_auth`
 
-第三方 Provider 如果使用：
+If the provider authenticates using:
 
 ```toml
 env_key = "REQUEST_ME_API_KEY"
 ```
 
-通常不要同时无条件写：
+do not automatically add:
 
 ```toml
 requires_openai_auth = true
 ```
 
-除非该 Provider 的认证流程确实要求 Codex 的 OpenAI 登录认证。
+unless that provider explicitly requires OpenAI login authentication in addition to its own API key.
 
-否则可能出现这样的冲突：
-
-```text
-你已经设置第三方 API Key
-          +
-requires_openai_auth = true
-          ↓
-Codex 仍要求 OpenAI auth / login
-```
-
-第三方 endpoint 的认证方式应以供应商实际要求为准。
+Otherwise Codex may still request an OpenAI login even though the third-party key is configured.
 
 ---
 
-## 5. 创建 codex3 wrapper
+## 5. Create a `codex3` Wrapper
 
-PowerShell profile 中可加入：
+Add to your PowerShell profile:
 
 ```powershell
 function codex3 {
@@ -188,27 +159,18 @@ function codex3 {
 }
 ```
 
-之后：
+Use:
 
 ```powershell
 codex3
-```
-
-等价于在独立第三方环境中启动 Codex。
-
-Resume：
-
-```powershell
 codex3 resume <Session-ID>
 ```
 
 ---
 
-## 6. 与本地 Lark Bridge 扩展一起使用
+## 6. Integration with the Local Lark Bridge Extension
 
-本仓库的 Windows Session monitor 需要和 Codex 使用同一个 `CODEX_HOME`。
-
-典型结构：
+The Windows monitor must use the same `CODEX_HOME` as Codex:
 
 ```text
 codex3
@@ -219,71 +181,59 @@ codex3
   │    └─ sessions/YYYY/MM/DD/rollout-....jsonl
   │
   └─ Attach detector
-       ├─ 找 Session
+       ├─ session discovery
        ├─ Observer
        └─ Release Agent
 ```
 
-如果 `codex3` 使用：
+If `codex3` uses:
 
 ```text
 %USERPROFILE%\.codex-cli-thirdparty
 ```
 
-Observer / Attach 也必须扫描这个 Session root：
+then Attach/Observer must scan:
 
 ```text
 %USERPROFILE%\.codex-cli-thirdparty\sessions
 ```
 
-否则会出现：
+A mismatch can produce:
 
 ```text
-Codex 正常运行
-但 /local-status 找不到 Session
+Codex works normally
+but /local-status cannot find the session
 ```
 
 ---
 
-## 7. 建议的 PowerShell profile
+## 7. PowerShell Profile
 
-如果你使用 Windows PowerShell 5.1：
-
-```powershell
-$PROFILE
-```
-
-可能类似：
+For Windows PowerShell 5.1, `$PROFILE` may be similar to:
 
 ```text
 C:\Users\<user>\OneDrive\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1
 ```
 
-把 `codex3` function 放进去后，新开终端验证：
+After adding `codex3`, open a new shell and verify:
 
 ```powershell
 Get-Command codex3
 ```
 
-再：
-
-```powershell
-codex3
-```
-
 ---
 
-## 8. 检查 Codex 是否读取正确配置
+## 8. Verify the Active Configuration
 
-启动：
+Run:
 
 ```powershell
 codex3
 ```
 
-在 Codex 内查看 `/status`。
+Then inspect Codex `/status`.
 
-重点确认：
+Check:
 
 ```text
 Model
@@ -292,87 +242,66 @@ Directory
 Session ID
 ```
 
-如果 Provider 仍是官方或旧 Provider，优先检查：
+If Codex still uses the old/default provider:
 
 ```powershell
 $env:CODEX_HOME
-```
-
-以及：
-
-```powershell
 Get-Content "$HOME\.codex-cli-thirdparty\config.toml"
 ```
 
 ---
 
-## 9. 常见问题
+## 9. Common Problems
 
 ### Missing environment variable
-
-例如：
 
 ```text
 Missing environment variable: REQUEST_ME_API_KEY
 ```
 
-检查：
+Check:
 
 ```powershell
 Test-Path Env:REQUEST_ME_API_KEY
 ```
 
-如果 User 环境变量已设置但当前进程看不到：
+### Configuration changed but Codex still uses the old one
 
-```powershell
-$env:REQUEST_ME_API_KEY =
-    [Environment]::GetEnvironmentVariable(
-        "REQUEST_ME_API_KEY",
-        "User"
-    )
-```
-
-### 修改了 config.toml，但 Codex 仍读旧配置
-
-检查当前 shell：
+Check:
 
 ```powershell
 $env:CODEX_HOME
 ```
 
-不要假设所有 `codex` 启动方式都自动使用 `.codex-cli-thirdparty`。
+Do not assume every `codex` invocation automatically uses `.codex-cli-thirdparty`.
 
-### 同一机器官方 Provider 与第三方 Provider 共存
+### Official and third-party providers on one machine
 
-推荐：
+Recommended:
 
 ```text
 codex
-→ 默认 CODEX_HOME
+→ default CODEX_HOME
 
 codex3
 → .codex-cli-thirdparty
 ```
 
-避免不停编辑同一个 `config.toml`。
+### Lark cannot see the third-party Codex session
 
-### Lark Bridge 里找不到第三方 Codex Session
-
-检查：
+Verify the same `CODEX_HOME` is used by:
 
 ```text
-codex3 使用的 CODEX_HOME
-Attach-CodexObserver.ps1 使用的 CodexHome
-Watch-CodexSession.ps1 使用的 CodexHome
+codex3
+Attach-CodexObserver.ps1
+Watch-CodexSession.ps1
 ```
-
-三者必须一致。
 
 ---
 
-## 10. Session 文件位置
+## 10. Session Files
 
-第三方 CODEX_HOME 中主要包括：
+Typical:
 
 ```text
 .codex-cli-thirdparty/
@@ -383,43 +312,33 @@ Watch-CodexSession.ps1 使用的 CodexHome
       └─ rollout-....jsonl
 ```
 
-其中：
-
-- rollout 保存 Session 事件流；
-- `session_index.jsonl` 保存 Session ID 与 Thread name 等索引信息；
-- Thread name 可能有多条 append-only rename 记录，应以最新记录为准。
+The rollout stores session events, while `session_index.jsonl` maintains thread-name/index information.
 
 ---
 
-## 11. 安全建议
+## 11. Security
 
-不要：
+Do not:
 
 ```text
-把 API Key 写入 config.toml
-把真实 Key 写进 PowerShell profile
-把 Key commit 到 Git
-把包含 Key 的截图或日志提交到 issue
+write the key into config.toml
+commit the key to Git
+store it in screenshots/issues/logs
 ```
 
-推荐：
+Prefer:
 
 ```text
 User environment variable
 +
-config.toml 只记录 env_key 名称
-```
-
-提交前可以检查：
-
-```powershell
-git diff --cached
+config.toml only references env_key
 ```
 
 ---
 
-## 12. 参考
+## 12. References
 
-- OpenAI Codex repository: https://github.com/openai/codex
-- Codex CLI documentation: https://developers.openai.com/codex/cli
-- 本仓库根 README: ../README.md
+- Codex config reference: https://developers.openai.com/docs/config-file/config-reference
+- Codex config sample: https://developers.openai.com/docs/config-file/config-sample
+- Codex source: https://github.com/openai/codex
+- Project README: ../README.md
