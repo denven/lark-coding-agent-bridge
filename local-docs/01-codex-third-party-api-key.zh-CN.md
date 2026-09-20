@@ -32,11 +32,11 @@ Third-party Codex
 
 ```mermaid
 flowchart LR
-    PS[PowerShell] --> C3[codex3 wrapper]
-    C3 --> CH[CODEX_HOME=.codex-cli-thirdparty]
-    CH --> CFG[config.toml]
-    CFG --> P[Third-party Provider]
-    P --> API[Responses-compatible API]
+    PS["PowerShell"] --> C3["codex3 wrapper"]
+    C3 --> CH["CODEX_HOME=.codex-cli-thirdparty"]
+    CH --> CFG["config.toml"]
+    CFG --> P["Third-party Provider"]
+    P --> API["Responses-compatible API"]
 ```
 
 ---

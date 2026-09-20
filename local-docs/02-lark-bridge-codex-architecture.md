@@ -57,11 +57,11 @@ It observes already-running Windows Codex sessions and provides safe writer rele
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant L as Lark
-    participant B as lark-channel-bridge
-    participant S as Session Store
-    participant C as Codex CLI
+    participant U as "User"
+    participant L as "Lark"
+    participant B as "lark-channel-bridge"
+    participant S as "Session Store"
+    participant C as "Codex CLI"
 
     U->>L: normal message
     L->>B: message event
@@ -165,15 +165,15 @@ Release only the Codex writer.
 
 ```mermaid
 flowchart TD
-    A[codex3 starts] --> B[Record LaunchId/CWD/owner PID]
-    B --> C[Find Codex process]
-    C --> D[Wait for matching session/rollout]
-    D --> E[Claim Session]
-    E --> F[Start Observer]
-    E --> G[Start Release Agent]
-    F --> H[status-SessionId.json]
-    G --> I[Wait for release requests]
-    E --> J[launch mapping]
+    A["codex3 starts"] --> B["Record LaunchId/CWD/owner PID"]
+    B --> C["Find Codex process"]
+    C --> D["Wait for matching session/rollout"]
+    D --> E["Claim Session"]
+    E --> F["Start Observer"]
+    E --> G["Start Release Agent"]
+    F --> H["status-SessionId.json"]
+    G --> I["Wait for release requests"]
+    E --> J["launch mapping"]
 ```
 
 A newly opened Codex TUI may exist before a persistent rollout/session has been created. Such a process is best considered a **Pending Launch**, not yet a fully discovered session.
@@ -223,12 +223,12 @@ The bridge does not directly kill the Windows Codex process. Instead it submits 
 
 ```mermaid
 sequenceDiagram
-    participant L as Lark Bridge
-    participant R as Request-CodexRelease.ps1
-    participant Q as Request JSON
-    participant A as Watch-CodexRelease.ps1
-    participant X as Release-CodexSession.ps1
-    participant C as Codex Writer
+    participant L as "Lark Bridge"
+    participant R as "Request-CodexRelease.ps1"
+    participant Q as "Request JSON"
+    participant A as "Watch-CodexRelease.ps1"
+    participant X as "Release-CodexSession.ps1"
+    participant C as "Codex Writer"
 
     L->>R: release Session
     R->>Q: write request
@@ -282,17 +282,17 @@ attachedAt
 
 ```mermaid
 flowchart TD
-    A[/local-handoff] --> B[Resolve unique Session]
-    B --> C{Bound to another Lark scope?}
-    C -- Yes --> X[Reject: handback from original scope]
-    C -- No --> D{Windows session busy?}
-    D -- Yes --> Y[Reject: wait for current turn]
-    D -- No --> E[Request-CodexRelease]
-    E --> F{PowerShell release successful?}
-    F -- No --> Z[Do not alter Lark binding]
-    F -- Yes --> G[Set scope cwd]
-    G --> H[Set scope sessionId]
-    H --> I[Next normal Lark message resumes the same Session]
+    A["/local-handoff"] --> B["Resolve unique Session"]
+    B --> C{"Bound to another Lark scope?"}
+    C -- Yes --> X["Reject: handback from original scope"]
+    C -- No --> D{"Windows session busy?"}
+    D -- Yes --> Y["Reject: wait for current turn"]
+    D -- No --> E["Request-CodexRelease"]
+    E --> F{"PowerShell release successful?"}
+    F -- No --> Z["Do not alter Lark binding"]
+    F -- Yes --> G["Set scope cwd"]
+    G --> H["Set scope sessionId"]
+    H --> I["Next normal Lark message resumes the same Session"]
 ```
 
 The order must be:

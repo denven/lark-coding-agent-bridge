@@ -35,13 +35,13 @@ App Server 更倾向于称它为 **Thread**。
 
 ```mermaid
 flowchart TD
-    T[Thread / Session] --> A[Turn 1]
-    T --> B[Turn 2]
-    T --> C[Turn 3]
-    B --> B1[User Message]
-    B --> B2[Agent Message]
-    B --> B3[Tool Call]
-    B --> B4[Tool Result]
+    T["Thread / Session"] --> A["Turn 1"]
+    T --> B["Turn 2"]
+    T --> C["Turn 3"]
+    B --> B1["User Message"]
+    B --> B2["Agent Message"]
+    B --> B3["Tool Call"]
+    B --> B4["Tool Result"]
 ```
 
 本项目额外引入 **Writer / Owner** 概念：
@@ -107,15 +107,15 @@ $CODEX_HOME/
 
 ```mermaid
 flowchart TD
-    I[session_index.jsonl] --> X[Session Inventory]
-    R[sessions/.../rollout-*.jsonl] --> X
-    D[state_*.sqlite] --> X
+    I["session_index.jsonl"] --> X["Session Inventory"]
+    R["sessions/.../rollout-*.jsonl"] --> X
+    D["state_*.sqlite"] --> X
 
     I -->|Thread name / ID 索引| X
     R -->|Canonical event history| X
     D -->|Thread metadata / search / archive| X
 
-    X --> Y[resume / search / monitor / handoff]
+    X --> Y["resume / search / monitor / handoff"]
 ```
 
 对本项目而言：
@@ -420,13 +420,13 @@ read-only
 
 ```mermaid
 flowchart TD
-    A[Base / System Instructions] --> M[Model Context]
-    B[Developer / Client Instructions] --> M
-    C[AGENTS.md hierarchy] --> M
-    D[Session History] --> M
-    E[Compaction Summary / Retained Context] --> M
-    F[Current User Prompt] --> M
-    G[Tool Results / Environment State] --> M
+    A["Base / System Instructions"] --> M["Model Context"]
+    B["Developer / Client Instructions"] --> M
+    C["AGENTS.md hierarchy"] --> M
+    D["Session History"] --> M
+    E["Compaction Summary / Retained Context"] --> M
+    F["Current User Prompt"] --> M
+    G["Tool Results / Environment State"] --> M
 ```
 
 因此要做 Prompt Inspector 时，不要简单认为：
@@ -575,10 +575,10 @@ Compaction 的作用可以理解为：
 
 ```mermaid
 flowchart LR
-    H[Long Raw History] --> C[Compaction]
-    C --> S[Compact Summary / Retained Context]
-    S --> N[Future Model Context]
-    H --> R[Persisted Rollout]
+    H["Long Raw History"] --> C["Compaction"]
+    C --> S["Compact Summary / Retained Context"]
+    S --> N["Future Model Context"]
+    H --> R["Persisted Rollout"]
 ```
 
 关键区别：
@@ -834,8 +834,8 @@ fork
 
 ```mermaid
 flowchart LR
-    A[Thread A] -->|resume| A2[Thread A continued]
-    A -->|fork| B[Thread B]
+    A["Thread A"] -->|resume| A2["Thread A continued"]
+    A -->|fork| B["Thread B"]
 ```
 
 未来如果需要：
@@ -940,18 +940,18 @@ Detached / Archived
 
 ```mermaid
 flowchart TD
-    P[Windows codex3 process] --> A[Attach-CodexObserver.ps1]
-    R[rollout JSONL] --> A
-    R --> O[Watch-CodexSession.ps1]
-    I[session_index.jsonl] --> O
-    O --> S[.codex-monitor/status-SessionId.json]
+    P["Windows codex3 process"] --> A["Attach-CodexObserver.ps1"]
+    R["rollout JSONL"] --> A
+    R --> O["Watch-CodexSession.ps1"]
+    I["session_index.jsonl"] --> O
+    O --> S[".codex-monitor/status-SessionId.json"]
 
-    A --> L[launch mapping]
-    A --> RA[Watch-CodexRelease.ps1]
+    A --> L["launch mapping"]
+    A --> RA["Watch-CodexRelease.ps1"]
 
-    S --> LS[/local-status]
-    S --> INV[/sessions]
-    L --> H[/local-handoff]
+    S --> LS["/local-status"]
+    S --> INV["/sessions"]
+    L --> H["/local-handoff"]
     RA --> H
 ```
 

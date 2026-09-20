@@ -183,19 +183,19 @@ Release-CodexSession.ps1
 
 ```mermaid
 flowchart LR
-    U[Lark User] --> B[lark-channel-bridge]
-    B --> S[Lark scope / Session binding]
-    S --> C[Codex CLI]
+    U["Lark User"] --> B["lark-channel-bridge"]
+    B --> S["Lark scope / Session binding"]
+    S --> C["Codex CLI"]
 
-    W[Windows Terminal / codex3] --> C2[Codex CLI]
-    C2 --> R[Codex rollout JSONL]
+    W["Windows Terminal / codex3"] --> C2["Codex CLI"]
+    C2 --> R["Codex rollout JSONL"]
 
-    A[Attach-CodexObserver.ps1] --> R
-    A --> O[Watch-CodexSession.ps1]
-    A --> RA[Watch-CodexRelease.ps1]
+    A["Attach-CodexObserver.ps1"] --> R
+    A --> O["Watch-CodexSession.ps1"]
+    A --> RA["Watch-CodexRelease.ps1"]
 
-    O --> M[.codex-monitor/status]
-    RA --> Q[release request/result]
+    O --> M[".codex-monitor/status"]
+    RA --> Q["release request/result"]
 
     B --> M
     B --> Q

@@ -55,11 +55,11 @@ Release-CodexSession.ps1
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant L as Lark
-    participant B as lark-channel-bridge
-    participant S as Session Store
-    participant C as Codex CLI
+    participant U as "User"
+    participant L as "Lark"
+    participant B as "lark-channel-bridge"
+    participant S as "Session Store"
+    participant C as "Codex CLI"
 
     U->>L: 普通消息
     L->>B: message event
@@ -239,15 +239,15 @@ Attach-CodexObserver.ps1
 
 ```mermaid
 flowchart TD
-    A[codex3 启动] --> B[记录 LaunchId/CWD/Owner PID]
-    B --> C[寻找 Codex process]
-    C --> D[等待匹配的 Session / rollout]
-    D --> E[Claim Session]
-    E --> F[启动 Watch-CodexSession]
-    E --> G[启动 Watch-CodexRelease]
-    F --> H[status-SessionId.json]
-    G --> I[等待 release request]
-    E --> J[launch mapping]
+    A["codex3 启动"] --> B["记录 LaunchId/CWD/Owner PID"]
+    B --> C["寻找 Codex process"]
+    C --> D["等待匹配的 Session / rollout"]
+    D --> E["Claim Session"]
+    E --> F["启动 Watch-CodexSession"]
+    E --> G["启动 Watch-CodexRelease"]
+    F --> H["status-SessionId.json"]
+    G --> I["等待 release request"]
+    E --> J["launch mapping"]
 ```
 
 新 Session 在第一次真正创建 rollout 之前，可能只有 Codex process 而没有正式 Session ID，因此 `/sessions` 未必能立即显示。
@@ -321,12 +321,12 @@ PID / parent ambiguity
 
 ```mermaid
 sequenceDiagram
-    participant L as Lark Bridge
-    participant R as Request-CodexRelease.ps1
-    participant Q as Request JSON
-    participant A as Watch-CodexRelease.ps1
-    participant X as Release-CodexSession.ps1
-    participant C as Codex Writer
+    participant L as "Lark Bridge"
+    participant R as "Request-CodexRelease.ps1"
+    participant Q as "Request JSON"
+    participant A as "Watch-CodexRelease.ps1"
+    participant X as "Release-CodexSession.ps1"
+    participant C as "Codex Writer"
 
     L->>R: release Session
     R->>Q: 写 request
@@ -398,17 +398,17 @@ attachedAt
 
 ```mermaid
 flowchart TD
-    A[/local-handoff] --> B[解析唯一 Session]
-    B --> C{已经绑定到其他 Lark scope?}
-    C -- Yes --> X[拒绝: 先在原 scope handback]
-    C -- No --> D{Windows Session Busy?}
-    D -- Yes --> Y[拒绝: 等待 turn 完成]
-    D -- No --> E[Request-CodexRelease]
-    E --> F{PowerShell release 成功?}
-    F -- No --> Z[不修改 Lark binding]
-    F -- Yes --> G[设置当前 scope cwd]
-    G --> H[设置当前 scope sessionId]
-    H --> I[下一条普通消息继续同一 Session]
+    A["/local-handoff"] --> B["解析唯一 Session"]
+    B --> C{"已经绑定到其他 Lark scope?"}
+    C -- Yes --> X["拒绝: 先在原 scope handback"]
+    C -- No --> D{"Windows Session Busy?"}
+    D -- Yes --> Y["拒绝: 等待 turn 完成"]
+    D -- No --> E["Request-CodexRelease"]
+    E --> F{"PowerShell release 成功?"}
+    F -- No --> Z["不修改 Lark binding"]
+    F -- Yes --> G["设置当前 scope cwd"]
+    G --> H["设置当前 scope sessionId"]
+    H --> I["下一条普通消息继续同一 Session"]
 ```
 
 关键顺序必须是：
