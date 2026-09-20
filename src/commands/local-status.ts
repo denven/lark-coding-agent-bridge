@@ -1,12 +1,17 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { CommandContext } from './index';
 
-interface LocalMonitorStatus {
+const MONITOR_HOME = join(
+  homedir(),
+  '.codex-monitor',
+);
+
+interface LocalStatus {
   version?: number;
   sessionId?: string;
   cwd?: string;
+  rolloutPath?: string;
 
   state?: string;
   lastActivity?: string;
@@ -18,281 +23,527 @@ interface LocalMonitorStatus {
   observerUpdatedAt?: string;
 }
 
-interface MonitorEntry {
-  path: string;
-  status: LocalMonitorStatus;
-  updatedMs: number;
+interface StatusEntry {
+  fileName: string;
+  status: LocalStatus;
+  updatedAt: number;
 }
 
-const MONITOR_HOME = join(homedir(), '.codex-monitor');
+function clean(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
 
-function escapeMd(value: string): string {
-  return value.replace(/([*_`\\])/g, '\\$1');
-}
-
-function escapeCode(value: string): string {
-  return value.replace(/`/g, "'");
-}
-
-function replyOptions(
-  ctx: CommandContext,
-): {
-  replyTo: string;
-  replyInThread?: true;
-} {
-  return {
-    replyTo: ctx.msg.messageId,
-    ...(ctx.chatMode === 'topic' && ctx.msg.threadId
-      ? { replyInThread: true as const }
-      : {}),
-  };
-}
-
-async function reply(
-  ctx: CommandContext,
-  markdown: string,
-): Promise<void> {
-  await ctx.channel.send(
-    ctx.msg.chatId,
-    { markdown },
-    replyOptions(ctx),
-  );
+  return String(value).replace(/`/g, "'");
 }
 
 function parseTime(value?: string): number {
-  if (!value) return 0;
+  if (!value) {
+    return 0;
+  }
 
-  const result = Date.parse(value);
+  const time = new Date(value).getTime();
 
-  return Number.isFinite(result)
-    ? result
-    : 0;
+  return Number.isNaN(time)
+    ? 0
+    : time;
 }
 
 function formatTime(value?: string): string {
-  const ms = parseTime(value);
+  const time = parseTime(value);
 
-  if (!ms) return 'unknown';
+  if (!time) {
+    return '—';
+  }
 
-  return new Date(ms).toLocaleString();
+  return new Date(time).toLocaleString();
 }
 
-function stateIcon(state?: string): string {
-  switch ((state ?? '').toLowerCase()) {
+function formatAge(value?: string): string {
+  const time = parseTime(value);
+
+  if (!time) {
+    return 'unknown';
+  }
+
+  const seconds = Math.max(
+    0,
+    Math.floor(
+      (Date.now() - time) / 1000,
+    ),
+  );
+
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+
+  const minutes = Math.floor(
+    seconds / 60,
+  );
+
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(
+    minutes / 60,
+  );
+
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  const days = Math.floor(
+    hours / 24,
+  );
+
+  return `${days}d ago`;
+}
+
+function stateIcon(
+  state?: string,
+): string {
+  switch (
+    (state ?? '').toLowerCase()
+  ) {
     case 'running':
       return '🔵';
 
     case 'waiting':
-      return '✅';
-
-    case 'interrupted':
-      return '🔴';
+      return '🟢';
 
     case 'exited':
-      return '⚪';
+      return '⚫';
 
     default:
-      return '🟡';
+      return '⚪';
   }
 }
 
-async function readMonitorEntries(): Promise<MonitorEntry[]> {
-  let files: string[];
+function stateRank(
+  state?: string,
+): number {
+  switch (
+    (state ?? '').toLowerCase()
+  ) {
+    case 'running':
+      return 0;
+
+    case 'waiting':
+      return 1;
+
+    case 'exited':
+      return 2;
+
+    default:
+      return 3;
+  }
+}
+
+function observerText(
+  status: LocalStatus,
+): string {
+  const state =
+    status.observerState ??
+    'Unknown';
+
+  if (
+    state.toLowerCase() ===
+    'running'
+  ) {
+    return (
+      `🟢 Running · heartbeat ` +
+      formatAge(
+        status.observerUpdatedAt,
+      )
+    );
+  }
+
+  if (
+    state.toLowerCase() ===
+    'stopped'
+  ) {
+    return '⚫ Stopped';
+  }
+
+  return state;
+}
+
+async function readStatuses():
+Promise<StatusEntry[]> {
+  let files;
 
   try {
-    files = await readdir(MONITOR_HOME);
-  } catch (error) {
-    console.error(
-      `[local-status] Cannot read monitor directory ${MONITOR_HOME}:`,
-      error,
+    files = await readdir(
+      MONITOR_HOME,
+      {
+        withFileTypes: true,
+      },
     );
-
+  }
+  catch {
     return [];
   }
 
-  const statusFiles = files.filter(
-    (name) =>
-      name.startsWith('status-') &&
-      name.endsWith('.json'),
-  );
+  const entries:
+    StatusEntry[] = [];
 
-  const entries = await Promise.all(
-    statusFiles.map(async (name): Promise<MonitorEntry | undefined> => {
-      const path = join(MONITOR_HOME, name);
+  for (const file of files) {
+    if (!file.isFile()) {
+      continue;
+    }
 
-      try {
-        const raw = await readFile(path, 'utf8');
+    if (
+      !file.name.startsWith(
+        'status-',
+      ) ||
+      !file.name.endsWith(
+        '.json',
+      )
+    ) {
+      continue;
+    }
 
-        // Windows PowerShell 5.x may write UTF-8 JSON with BOM.
-        const cleanRaw = raw.replace(/^\uFEFF/, '').trim();
-
-        const status =
-          JSON.parse(cleanRaw) as LocalMonitorStatus;
-
-        return {
-          path,
-          status,
-          updatedMs: parseTime(status.observerUpdatedAt),
-        };
-      } catch (error) {
-        console.error(
-          `[local-status] Failed to read ${path}:`,
-          error,
-        );
-
-        return undefined;
-      }
-    }),
-  );
-
-  return entries.filter(
-    (entry): entry is MonitorEntry =>
-      entry !== undefined,
-  );
-}
-
-export async function handleLocalStatus(
-  args: string,
-  ctx: CommandContext,
-): Promise<void> {
-  const query = args.trim().toLowerCase();
-
-  let entries =
-    await readMonitorEntries();
-
-  if (entries.length === 0) {
-    await reply(
-      ctx,
-      [
-        '⚠️ **没有发现 Windows Codex Observer 状态。**',
-        '',
-        `监控目录：\`${escapeCode(MONITOR_HOME)}\``,
-        '',
-        '请确认 `Watch-CodexSession.ps1` 正在运行。',
-      ].join('\n'),
+    const path = join(
+      MONITOR_HOME,
+      file.name,
     );
 
-    return;
-  }
+    try {
+      let raw =
+        await readFile(
+          path,
+          'utf8',
+        );
 
-  if (query) {
-    entries = entries.filter((entry) => {
-      const sessionId =
-        entry.status.sessionId ??
-        '';
+      raw = raw
+        .replace(/^\uFEFF/, '')
+        .trim();
 
-      return sessionId
-        .toLowerCase()
-        .startsWith(query);
-    });
+      if (!raw) {
+        continue;
+      }
 
-    if (entries.length === 0) {
-      await reply(
-        ctx,
-        `未找到 Session：\`${escapeCode(args.trim())}\``,
-      );
+      const status =
+        JSON.parse(
+          raw,
+        ) as LocalStatus;
 
-      return;
+      if (!status.sessionId) {
+        continue;
+      }
+
+      const updatedAt =
+        Math.max(
+          parseTime(
+            status.observerUpdatedAt,
+          ),
+          parseTime(
+            status.lastEventTime,
+          ),
+        );
+
+      entries.push({
+        fileName: file.name,
+        status,
+        updatedAt,
+      });
+    }
+    catch {
+      // Ignore broken or partially written
+      // historical status files.
     }
   }
 
   entries.sort(
-    (a, b) =>
-      b.updatedMs - a.updatedMs,
+    (a, b) => {
+      const rankDiff =
+        stateRank(
+          a.status.state,
+        ) -
+        stateRank(
+          b.status.state,
+        );
+
+      if (rankDiff !== 0) {
+        return rankDiff;
+      }
+
+      return (
+        b.updatedAt -
+        a.updatedAt
+      );
+    },
   );
 
-  const selected = entries[0];
+  return entries;
+}
 
-  if (!selected) {
-    await reply(
-      ctx,
-      '未找到可用的 Windows Codex Session 状态。',
-    );
-
-    return;
+function formatSummary(
+  entries: StatusEntry[],
+): string {
+  if (entries.length === 0) {
+    return [
+      '🖥 **Windows Codex Sessions**',
+      '',
+      '当前没有找到本地 Codex monitor 状态。',
+    ].join('\n');
   }
 
-  const status = selected.status;
+  const lines: string[] = [
+    '🖥 **Windows Codex Sessions**',
+    '',
+    `发现 **${entries.length}** 个本地 Session：`,
+    '',
+  ];
 
-  const now = Date.now();
+  entries.forEach(
+    (entry, index) => {
+      const status =
+        entry.status;
 
-  const heartbeatAgeSeconds =
-    selected.updatedMs > 0
-      ? Math.max(
-          0,
-          Math.floor(
-            (now - selected.updatedMs) / 1000,
-          ),
-        )
-      : undefined;
+      const state =
+        status.state ??
+        'Unknown';
 
-  const observerFresh =
-    status.observerState === 'Running' &&
-    heartbeatAgeSeconds !== undefined &&
-    heartbeatAgeSeconds <= 20;
+      lines.push(
+        `${index + 1}. ` +
+        `${stateIcon(state)} ` +
+        `**${clean(state)}**`,
+      );
 
-  const observerText =
-    observerFresh
-      ? `🟢 Running · heartbeat ${heartbeatAgeSeconds}s ago`
-      : status.observerState === 'Running'
-        ? `🟠 stale · last heartbeat ${
-            heartbeatAgeSeconds ?? '?'
-          }s ago`
-        : `⚪ ${
-            status.observerState ??
-            'Unknown'
-          }`;
+      lines.push(
+        `   🔗 \`${clean(
+          status.sessionId,
+        )}\``,
+      );
 
-  const sessionId =
-    status.sessionId ??
-    'unknown';
+      if (status.cwd) {
+        lines.push(
+          `   📁 \`${clean(
+            status.cwd,
+          )}\``,
+        );
+      }
 
-  const shortSession =
-    sessionId.length > 12
-      ? `${sessionId.slice(0, 12)}…`
-      : sessionId;
+      lines.push(
+        `   👁 ${observerText(
+          status,
+        )}`,
+      );
 
+      if (
+        status.lastActivity
+      ) {
+        lines.push(
+          `   ⚙️ ${clean(
+            status.lastActivity,
+          )}`,
+        );
+      }
+
+      lines.push('');
+    },
+  );
+
+  lines.push(
+    '查看某个 Session 的详细状态：',
+  );
+
+  lines.push('');
+
+  lines.push(
+    '`/local-status <Session-ID前缀>`',
+  );
+
+  return lines.join('\n');
+}
+
+function formatDetail(
+  status: LocalStatus,
+): string {
   const state =
     status.state ??
-    'Unknown';
-
-  const activity =
-    status.lastActivity ??
-    'Unknown';
-
-  const cwd =
-    status.cwd ??
     'Unknown';
 
   const lines = [
     '🖥 **Windows Codex Session**',
     '',
-    `${stateIcon(state)} **State:** ${escapeMd(state)}`,
-    `🔗 **Session:** \`${escapeCode(shortSession)}\``,
-    `📁 **CWD:** \`${escapeCode(cwd)}\``,
-    `⚙️ **Activity:** ${escapeMd(activity)}`,
-    `👁 **Observer:** ${escapeMd(observerText)}`,
-    `🕒 **Last Codex event:** ${escapeMd(
-      formatTime(status.lastEventTime),
-    )}`,
-    `💓 **Observer updated:** ${escapeMd(
-      formatTime(status.observerUpdatedAt),
-    )}`,
+    `${stateIcon(state)} **State:** ${clean(state)}`,
+    '',
+    `🔗 **Session:** \`${clean(
+      status.sessionId,
+    )}\``,
   ];
 
-  if (!query && entries.length > 1) {
+  if (status.cwd) {
     lines.push(
       '',
-      `发现 ${entries.length} 个 monitor 状态文件。`,
-      '当前显示最近更新的一个。',
-      '',
-      '可使用：',
-      '`/local-status <Session-ID前几位>`',
+      `📁 **CWD:** \`${clean(
+        status.cwd,
+      )}\``,
     );
   }
 
-  await reply(
-    ctx,
-    lines.join('\n'),
+  if (status.lastActivity) {
+    lines.push(
+      '',
+      `⚙️ **Activity:** ${clean(
+        status.lastActivity,
+      )}`,
+    );
+  }
+
+  lines.push(
+    '',
+    `👁 **Observer:** ${observerText(
+      status,
+    )}`,
+  );
+
+  if (status.observerPid) {
+    lines.push(
+      '',
+      `🔧 **Observer PID:** \`${status.observerPid}\``,
+    );
+  }
+
+  if (status.lastEventType) {
+    lines.push(
+      '',
+      `📡 **Last event:** \`${clean(
+        status.lastEventType,
+      )}\``,
+    );
+  }
+
+  if (status.lastEventTime) {
+    lines.push(
+      '',
+      `🕒 **Last Codex event:** ${formatTime(
+        status.lastEventTime,
+      )}`,
+    );
+  }
+
+  if (
+    status.observerUpdatedAt
+  ) {
+    lines.push(
+      '',
+      `💓 **Observer updated:** ${formatTime(
+        status.observerUpdatedAt,
+      )}`,
+    );
+  }
+
+  if (status.rolloutPath) {
+    lines.push(
+      '',
+      `📄 **Rollout:** \`${clean(
+        status.rolloutPath,
+      )}\``,
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export async function handleLocalStatus(
+  args: string,
+): Promise<string> {
+  const query =
+    args.trim();
+
+  const entries =
+    await readStatuses();
+
+  /*
+   * No argument:
+   *
+   * /local-status
+   *
+   * Show all Sessions.
+   *
+   * "all" is an explicit alias:
+   *
+   * /local-status all
+   */
+  if (
+    !query ||
+    query.toLowerCase() ===
+      'all'
+  ) {
+    return formatSummary(
+      entries,
+    );
+  }
+
+  const prefix =
+    query.toLowerCase();
+
+  const matches =
+    entries.filter(
+      (entry) =>
+        entry.status.sessionId
+          ?.toLowerCase()
+          .startsWith(prefix),
+    );
+
+  if (matches.length === 0) {
+    return [
+      '❌ **没有找到对应的 Windows Codex Session。**',
+      '',
+      `Session 前缀：\`${clean(
+        query,
+      )}\``,
+      '',
+      '使用 `/local-status` 查看所有本地 Session。',
+    ].join('\n');
+  }
+
+  if (matches.length > 1) {
+    const lines = [
+      '⚠️ **Session ID 前缀不唯一。**',
+      '',
+      '匹配到：',
+      '',
+    ];
+
+    for (
+      const match
+      of matches
+    ) {
+      lines.push(
+        `- \`${clean(
+          match.status.sessionId,
+        )}\` · ` +
+        `${clean(
+          match.status.state ??
+          'Unknown',
+        )}`,
+      );
+    }
+
+    lines.push(
+      '',
+      '请提供更多位 Session ID。',
+    );
+
+    return lines.join('\n');
+  }
+
+  const match = matches[0];
+
+  if (!match) {
+    return [
+      '❌ **没有找到对应的 Windows Codex Session。**',
+      '',
+      '使用 `/local-status` 查看所有本地 Session。',
+    ].join('\n');
+  }
+
+  return formatDetail(
+    match.status,
   );
 }

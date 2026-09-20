@@ -8,6 +8,7 @@ import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agen
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import { handleLocalStatus } from './local-status';
+import { handleLocalRelease } from './local-release';
 
 import {
   accountCurrentCard,
@@ -175,7 +176,14 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
-  '/local-status': handleLocalStatus,
+  '/local-status': async (args, ctx) => {
+    const markdown = await handleLocalStatus(args);
+    await reply(ctx, markdown);
+  },
+  '/local-release': async (args, ctx) => {
+    const markdown = await handleLocalRelease(args);
+    await reply(ctx, markdown);
+  },
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -204,6 +212,7 @@ const ADMIN_COMMANDS = new Set([
   '/reconnect',
   '/doctor',
   '/local-status',
+  '/local-release',
   '/cd',
   '/ws',
   '/invite',
