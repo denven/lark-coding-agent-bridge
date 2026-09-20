@@ -1,11 +1,18 @@
-# Screenshot filenames used by the root README
+# Screenshots
 
-The root README references these repository-relative files:
+The root README expects these three screenshots:
 
 ```text
-screenshots/lark-session-status.png
-screenshots/windows-codex-sessions.png
-screenshots/all-codex-sessions.png
+screenshots/
+├─ lark-session-status.png
+├─ windows-codex-sessions.png
+└─ all-codex-sessions.png
 ```
 
-Use the three screenshots already captured for `/lark status`, `/windows status`, and `/session list` under these filenames (or update the three image paths in the root README files to match the existing names).
+They demonstrate the fork-specific remote session-management UI:
+
+- `lark-session-status.png` — current Lark scope/session binding and quick actions.
+- `windows-codex-sessions.png` — Windows Codex runtime sessions and safe Release actions.
+- `all-codex-sessions.png` — global inventory with ownership-aware Use / Handoff / Hand Back actions.
+
+The screenshots document extensions built on top of the upstream `lark-channel-bridge` project.

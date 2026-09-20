@@ -1,10 +1,69 @@
-# lark-channel-bridge — Local Codex Session Handoff Extension
+# lark-channel-bridge — Windows Codex Session 远程管理扩展
 
 [English](./README.md) | **简体中文**
 
-> 本仓库是在上游 `lark-channel-bridge` 基础上维护的 Windows 本地增强版本，重点解决 **Codex CLI Session 的远程监控、安全 handoff / handback、多 Session ownership 管理，以及通过 Lark/飞书进行远程操作**。
+> 本仓库是在上游 **`lark-channel-bridge`** 基础上维护的 Windows / Codex 增强版本，重点增加本地 Codex CLI Session 的发现与监控、Windows 与 Lark 之间的安全 ownership transfer，以及通过 Lark Mobile App / Lark Web 远程管理多个 Codex Session 的能力。
 
-本次增强的重点之一，是让这些 Session 操作在 **Lark Mobile App** 和 **Lark Web** 中都更容易完成。通过 Interactive Card，可以直接查看当前 Lark binding、Windows runtime Session 以及全局 Codex Session inventory，并通过按钮完成常见远程操作，不必在手机上反复输入较长的 Session ID，也不需要为了切换 Session 专门连接远程桌面。
+## 上游项目 — `lark-channel-bridge`
+
+本仓库建立在上游 **`lark-channel-bridge`** 项目之上。上游项目名称是 `lark-channel-bridge`，其 GitHub 仓库为 [`zarazhangrui/lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge)。
+
+上游项目提供了本 fork 所依赖的核心基础：把 **飞书/Lark** 与本地 **Claude Code 或 Codex CLI** 连接起来，并提供 Chat / Topic 独立 Session、Workspace 切换、文件与图片传递、Streaming / Interactive Card、任务排队、权限控制、Profile 和后台运行机制等能力。
+
+关于原版 Bridge 的安装、支持的 Agent、基础配置和通用行为，请以上游文档为准：
+
+- **上游仓库：** [`zarazhangrui/lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge)
+- **原版英文 README：** [Upstream `README.md`](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.md)
+- **原版中文 README：** [Upstream `README.zh.md`](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.zh.md)
+
+本 fork 在主 README 中明确保留上游来源和 README 链接，是为了说明下面这些能力均建立在 `lark-channel-bridge` 之上，而不是对原项目的替代。
+
+## 本 fork 新增了什么
+
+上游 bridge 已经能够让一个 Lark Chat / Group / Topic 与本地 Coding Agent 交互。本 fork 进一步增加了一个面向 Windows 的 **Codex Session 控制层**，用于管理那些直接在 Windows Terminal 中启动、并不一定由当前 Lark scope 创建的 Codex Session。
+
+| 能力 | 上游 `lark-channel-bridge` | 本 fork 新增 |
+|---|---|---|
+| Lark/飞书 ↔ Claude Code / Codex Bridge | 上游核心能力 | 直接复用 |
+| Chat / Topic 独立 Session | 上游核心能力 | 保留 |
+| Workspace 切换与保存 | 上游核心能力 | 保留 |
+| Streaming / Interactive Card | 上游核心能力 | 增加 Session 控制 Action |
+| 独立从 Windows 启动的 Codex Session | 不是原 Lark scope 模型的主要关注点 | 自动发现与监控 |
+| Windows Runtime 视图 | — | `/windows status` |
+| 安全释放 Windows writer | — | `/windows release` + Release Agent |
+| 跨运行时 Session inventory | — | `/session list` |
+| Detached Session → 当前 Lark scope | — | `/session use` |
+| Windows → Lark ownership transfer | — | `/session handoff` |
+| Lark → Windows-ready handback | — | `/session handback` |
+| Session ownership 模型 | Lark scope binding | Windows / Lark / Detached + 单 writer 规则 |
+| Mobile / Web 远程 Session 管理 | 通用 Lark 交互 | 针对 **Lark Mobile App** / **Lark Web** 优化 Session 切换与 ownership Action |
+| Action 身份 | 随命令而定 | UI 优先显示 Thread Name；底层执行始终使用 exact full Session ID |
+
+### 为什么增加这些能力
+
+一个典型场景是在 Windows 工作站中直接启动多个 Codex CLI Session，然后离开电脑。新增的 Observer、Monitor、Release 和 Ownership 层可以把这些已经存在的 Session 暴露给 Lark：
+
+```text
+Windows Terminal / codex3
+        │
+        ├─ Session A
+        ├─ Session B
+        └─ Session C
+             │
+             ▼
+      Windows Observer layer
+             │
+             ▼
+        .codex-monitor
+             │
+             ▼
+      lark-channel-bridge
+             │
+             ▼
+      Lark Mobile / Lark Web
+```
+
+这样无需连接 Remote Desktop，就可以从 Lark 查看 Windows Session、release Waiting 状态的 Windows writer、把 Session handoff 到当前 Lark scope、接管 Detached Session，并在之后 handback 给 Windows。
 
 ## 从 Lark 远程管理 Codex Session
 
@@ -177,6 +236,12 @@ lark-channel-bridge start --profile codex
 - [Lark / Bridge / Codex 架构](./local-docs/02-lark-bridge-codex-architecture.zh-CN.md)
 - [Codex Session 管理](./local-docs/03-codex-session-management.zh-CN.md)
 
-## 上游
+## 上游与致谢
 
-基于 `zarazhangrui/lark-coding-agent-bridge`。
+本项目扩展自 **`lark-channel-bridge`**，基础架构与运行机制来自上游项目。
+
+- [上游仓库](https://github.com/zarazhangrui/lark-coding-agent-bridge)
+- [上游英文 README](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.md)
+- [上游中文 README](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.zh.md)
+
+关于基础安装、支持的 Agent、上游命令、飞书/Lark App 配置和通用 Bridge 行为，请以上游 README 为准。本仓库文档重点记录新增的 Windows Codex 监控、远程 Session 控制、安全 release、handoff/handback 和跨运行时 ownership 能力。

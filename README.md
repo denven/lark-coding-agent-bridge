@@ -1,10 +1,69 @@
-# lark-channel-bridge — Local Codex Session Handoff Extension
+# lark-channel-bridge — Windows Codex Session Remote Management Extension
 
 **English** | [简体中文](./README.zh-CN.md)
 
-> A Windows-focused extension of `lark-channel-bridge` for remote Codex CLI monitoring, safe session handoff/handback, and multi-session ownership management through Lark/Feishu.
+> A Windows-focused downstream extension of **`lark-channel-bridge`** for discovering and monitoring local Codex CLI sessions, safely transferring session ownership between Windows and Lark, and remotely managing multiple Codex sessions from Lark Mobile App or Lark Web.
 
-The extension is designed to make Codex session operations practical from both **Lark Mobile App** and **Lark Web**. Interactive cards expose the current Lark binding, Windows runtime sessions, and the global Codex session inventory, so common remote operations can be performed without typing long Session IDs or opening a remote desktop session.
+## Upstream project — `lark-channel-bridge`
+
+This repository is built on top of the upstream **`lark-channel-bridge`** project. The upstream project name is `lark-channel-bridge`; its GitHub repository is [`zarazhangrui/lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge).
+
+The upstream project provides the foundation used by this fork: a local bridge between **Feishu/Lark** and **Claude Code or Codex CLI**, with per-chat/topic session continuity, workspace switching, file/image forwarding, streaming/interactive cards, queueing, access controls, profiles, and background runtime management.
+
+Please treat the upstream documentation as the authoritative reference for the original bridge behavior, installation, supported agents, and general configuration:
+
+- **Upstream repository:** [`zarazhangrui/lark-coding-agent-bridge`](https://github.com/zarazhangrui/lark-coding-agent-bridge)
+- **Original English README:** [Upstream `README.md`](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.md)
+- **Original Chinese README:** [Upstream `README.zh.md`](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.zh.md)
+
+This fork intentionally keeps the upstream project prominent in the documentation. The features below are **extensions built on top of `lark-channel-bridge`**, not a replacement for the original project.
+
+## What this fork adds
+
+The upstream bridge already lets a Lark Chat / Group / Topic interact with a local coding agent. This fork adds a Windows-focused **Codex Session control plane** for Codex sessions that may have been started independently in Windows Terminal rather than created only through the current Lark scope.
+
+| Area | Upstream `lark-channel-bridge` | This fork adds |
+|---|---|---|
+| Lark/Feishu ↔ Claude Code / Codex bridge | Core upstream feature | Reused as the foundation |
+| Per-chat/topic session continuity | Core upstream feature | Preserved |
+| Workspace switching and saved workspaces | Core upstream feature | Preserved |
+| Streaming and interactive cards | Core upstream feature | Extended with session-control actions |
+| Windows Codex sessions started independently of Lark | Not the focus of the original Lark scope model | Automatic local discovery and monitoring |
+| Windows runtime view | — | `/windows status` |
+| Safe Windows writer release | — | `/windows release` with Release Agent |
+| Cross-runtime session inventory | — | `/session list` |
+| Detached Session → current Lark scope | — | `/session use` |
+| Windows → Lark ownership transfer | — | `/session handoff` |
+| Lark → Windows-ready handback | — | `/session handback` |
+| Session ownership model | Lark scope binding | Windows / Lark / Detached with a single-writer rule |
+| Mobile/Web remote session control | General Lark interaction | Session switching and ownership actions optimized for **Lark Mobile App** and **Lark Web** |
+| Action identity | Command-specific | Readable Thread Name in UI; exact full Session ID for execution |
+
+### Why these extensions exist
+
+A common workflow is to start several Codex CLI sessions directly on a Windows workstation and later leave the computer. The additional Observer, monitor, release, and ownership layers let Lark become a remote control surface for those existing sessions:
+
+```text
+Windows Terminal / codex3
+        │
+        ├─ Session A
+        ├─ Session B
+        └─ Session C
+             │
+             ▼
+      Windows Observer layer
+             │
+             ▼
+        .codex-monitor
+             │
+             ▼
+      lark-channel-bridge
+             │
+             ▼
+      Lark Mobile / Lark Web
+```
+
+From Lark you can inspect Windows sessions, safely release a waiting Windows writer, hand a session to the current Lark scope, use a detached session, and hand the current Lark-owned session back to Windows without requiring Remote Desktop.
 
 ## Remote Codex session management from Lark
 
@@ -169,6 +228,12 @@ Do not replace the local build with `npm install -g lark-channel-bridge@latest`;
 - [Lark / Bridge / Codex architecture](./local-docs/02-lark-bridge-codex-architecture.md)
 - [Codex session management](./local-docs/03-codex-session-management.md)
 
-## Upstream
+## Upstream and attribution
 
-Based on `zarazhangrui/lark-coding-agent-bridge`.
+This project extends **`lark-channel-bridge`** and depends on the upstream project's architecture and runtime behavior.
+
+- [Upstream repository](https://github.com/zarazhangrui/lark-coding-agent-bridge)
+- [Upstream English README](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.md)
+- [Upstream Chinese README](https://github.com/zarazhangrui/lark-coding-agent-bridge/blob/main/README.zh.md)
+
+For base installation, supported agents, upstream commands, Feishu/Lark app setup, and general bridge configuration, follow the upstream README. The documentation in this repository focuses on the additional Windows Codex monitoring, remote session control, safe release, handoff/handback, and cross-runtime ownership features.
