@@ -20,14 +20,23 @@ param(
     [string]$ReleaseAgentScript =
         "$HOME\Scripts\Watch-CodexRelease.ps1",
 
-    [int]$TimeoutSeconds = 120
+    # This timeout is ONLY for discovering the Codex process.
+    # Once the Codex process exists, we keep waiting for its
+    # Session/rollout for as long as Codex remains alive.
+    [int]$TimeoutSeconds = 60,
+
+    [int]$PollMilliseconds = 400,
+
+    [int]$ProgressLogSeconds = 10,
+
+    [int]$ClaimStaleSeconds = 300
 )
 
 $ErrorActionPreference = "Stop"
 
 
 # ============================================================
-# Configuration / Paths
+# Paths
 # ============================================================
 
 $monitorHome =
@@ -42,39 +51,10 @@ $launchDir =
 $logDir =
     Join-Path $monitorHome "logs"
 
-
-# A claim younger than this is treated as active.
-$ClaimStaleSeconds =
-    [Math]::Max(
-        $TimeoutSeconds + 30,
-        150
-    )
-
-
-New-Item `
-    -ItemType Directory `
-    -Path $monitorHome `
-    -Force |
-    Out-Null
-
-New-Item `
-    -ItemType Directory `
-    -Path $claimDir `
-    -Force |
-    Out-Null
-
-New-Item `
-    -ItemType Directory `
-    -Path $launchDir `
-    -Force |
-    Out-Null
-
-New-Item `
-    -ItemType Directory `
-    -Path $logDir `
-    -Force |
-    Out-Null
-
+$launchFile =
+    Join-Path `
+        $launchDir `
+        "$LaunchId.json"
 
 $logFile =
     Join-Path `
@@ -82,10 +62,21 @@ $logFile =
         "attach-$LaunchId.log"
 
 
-$launchFile =
-    Join-Path `
-        $launchDir `
-        "$LaunchId.json"
+foreach (
+    $dir in @(
+        $monitorHome,
+        $claimDir,
+        $launchDir,
+        $logDir
+    )
+) {
+
+    New-Item `
+        -ItemType Directory `
+        -Path $dir `
+        -Force |
+        Out-Null
+}
 
 
 # ============================================================
@@ -98,13 +89,18 @@ function Write-Log {
         [string]$Message
     )
 
-    $line =
-        "$(Get-Date -Format o) $Message"
+    try {
 
-    Add-Content `
-        -Path $logFile `
-        -Value $line `
-        -Encoding UTF8
+        Add-Content `
+            -Path $logFile `
+            -Value (
+                "$(Get-Date -Format o) $Message"
+            ) `
+            -Encoding UTF8
+
+    }
+    catch {
+    }
 }
 
 
@@ -124,7 +120,7 @@ function Write-JsonNoBom {
 
     $json =
         $Value |
-        ConvertTo-Json -Depth 20
+        ConvertTo-Json -Depth 30
 
     $utf8 =
         New-Object `
@@ -151,9 +147,14 @@ function Read-JsonFile {
 
     try {
 
+        $utf8 =
+            New-Object `
+                System.Text.UTF8Encoding($false)
+
         $raw =
             [System.IO.File]::ReadAllText(
-                $Path
+                $Path,
+                $utf8
             )
 
         $raw =
@@ -173,6 +174,7 @@ function Read-JsonFile {
             $raw |
             ConvertFrom-Json
         )
+
     }
     catch {
 
@@ -191,7 +193,11 @@ function Normalize-Path {
         [string]$Path
     )
 
-    if (-not $Path) {
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $Path
+        )
+    ) {
         return ""
     }
 
@@ -200,16 +206,19 @@ function Normalize-Path {
         return (
             [System.IO.Path]::GetFullPath(
                 $Path
-            )
-        ).
-        TrimEnd("\").
-        ToLowerInvariant()
+            ).
+            TrimEnd("\").
+            ToLowerInvariant()
+        )
+
     }
     catch {
 
-        return $Path.
+        return (
+            $Path.
             TrimEnd("\").
             ToLowerInvariant()
+        )
     }
 }
 
@@ -218,33 +227,20 @@ function Normalize-Path {
 # Process helpers
 # ============================================================
 
-function Test-ProcessAlive {
+function Get-CimProcessById {
 
     param(
         [int]$ProcessId
     )
 
-    if (-not $ProcessId) {
-        return $false
-    }
-
-    $process =
-        Get-Process `
-            -Id $ProcessId `
-            -ErrorAction SilentlyContinue
-
     return (
-        $null -ne $process
+        Get-CimInstance `
+            Win32_Process `
+            -Filter "ProcessId=$ProcessId" `
+            -ErrorAction SilentlyContinue
     )
 }
 
-
-# ============================================================
-# Convert Win32_Process CreationDate safely
-#
-# Get-CimInstance normally returns System.DateTime.
-# Older WMI-style data may still return DMTF text.
-# ============================================================
 
 function Convert-CreationDateToUtc {
 
@@ -273,6 +269,7 @@ function Convert-CreationDateToUtc {
             ).
             ToUniversalTime()
         )
+
     }
     catch {
 
@@ -281,108 +278,71 @@ function Convert-CreationDateToUtc {
 }
 
 
-# ============================================================
-# Read Codex Session metadata from rollout JSONL
-# ============================================================
-
-function Get-SessionMetadata {
+function Test-ProcessAlive {
 
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$RolloutPath
+        [int]$ProcessId
     )
 
-    try {
-
-        $lines =
-            Get-Content `
-                -Path $RolloutPath `
-                -TotalCount 50 `
-                -ErrorAction Stop
-
-        foreach ($line in $lines) {
-
-            try {
-
-                $event =
-                    $line |
-                    ConvertFrom-Json
-
-            }
-            catch {
-
-                continue
-            }
-
-            if (
-                $event.type -ne
-                "session_meta"
-            ) {
-                continue
-            }
-
-
-            $sessionId =
-                $null
-
-
-            if ($event.payload.id) {
-
-                $sessionId =
-                    [string]$event.payload.id
-
-            }
-            elseif (
-                $event.payload.session_id
-            ) {
-
-                $sessionId =
-                    [string]$event.payload.session_id
-            }
-
-
-            if (-not $sessionId) {
-                continue
-            }
-
-
-            return (
-                [pscustomobject]@{
-
-                    SessionId =
-                        $sessionId
-
-                    Cwd =
-                        [string]$event.payload.cwd
-                }
-            )
-        }
+    if ($ProcessId -le 0) {
+        return $false
     }
-    catch {
 
-        Write-Log (
-            "Failed reading rollout metadata: " +
-            "$RolloutPath : " +
-            $_.Exception.Message
+    return (
+        $null -ne (
+            Get-Process `
+                -Id $ProcessId `
+                -ErrorAction SilentlyContinue
         )
+    )
+}
+
+
+function Test-SameProcess {
+
+    param(
+        [int]$ProcessId,
+
+        [datetime]$ExpectedCreatedUtc
+    )
+
+    $process =
+        Get-CimProcessById `
+            -ProcessId $ProcessId
+
+    if (-not $process) {
+        return $false
     }
 
-    return $null
+    $actualCreatedUtc =
+        Convert-CreationDateToUtc `
+            -Value $process.CreationDate
+
+    if (-not $actualCreatedUtc) {
+        return $false
+    }
+
+    $difference =
+        [math]::Abs(
+            (
+                $actualCreatedUtc -
+                $ExpectedCreatedUtc
+            ).TotalSeconds
+        )
+
+    return (
+        $difference -le 2
+    )
 }
 
 
 # ============================================================
-# Get descendants of the PowerShell running codex3
-#
-# Output:
-#   Process = Win32_Process
-#   Depth   = distance from owner PowerShell
+# Process tree
 # ============================================================
 
 function Get-ChildProcessTree {
 
     param(
-        [Parameter(Mandatory = $true)]
         [int]$RootPid
     )
 
@@ -395,16 +355,13 @@ function Get-ChildProcessTree {
         return @()
     }
 
-
     $result =
         New-Object `
             System.Collections.Generic.List[object]
 
-
     $queue =
         New-Object `
             System.Collections.Queue
-
 
     $queue.Enqueue(
         [pscustomobject]@{
@@ -413,19 +370,16 @@ function Get-ChildProcessTree {
         }
     )
 
-
-    $visited = @{}
-
+    $visited =
+        @{}
 
     while ($queue.Count -gt 0) {
 
         $item =
             $queue.Dequeue()
 
-
         $parentPid =
             [int]$item.Pid
-
 
         if (
             $visited.ContainsKey(
@@ -435,41 +389,30 @@ function Get-ChildProcessTree {
             continue
         }
 
-
         $visited[$parentPid] =
             $true
-
 
         $children =
             $all |
             Where-Object {
-
                 [int]$_.ParentProcessId -eq
-                    $parentPid
+                $parentPid
             }
-
 
         foreach ($child in $children) {
 
             $depth =
                 [int]$item.Depth + 1
 
-
             $result.Add(
                 [pscustomobject]@{
-
-                    Process =
-                        $child
-
-                    Depth =
-                        $depth
+                    Process = $child
+                    Depth   = $depth
                 }
             )
 
-
             $queue.Enqueue(
                 [pscustomobject]@{
-
                     Pid =
                         [int]$child.ProcessId
 
@@ -480,64 +423,38 @@ function Get-ChildProcessTree {
         }
     }
 
-
     return $result
 }
 
 
-# ============================================================
-# Find Codex process belonging to THIS codex3 invocation
-#
-# Typical Windows layout:
-#
-# powershell.exe
-#   └─ node.exe          <- codexRootPid
-#       └─ codex.exe
-# ============================================================
-
 function Find-CodexProcess {
 
     param(
-        [Parameter(Mandatory = $true)]
         [int]$OwnerPid,
 
-        [Parameter(Mandatory = $true)]
         [datetime]$LaunchUtc
     )
-
 
     $tree =
         Get-ChildProcessTree `
             -RootPid $OwnerPid
 
-
-    if (-not $tree) {
-        return $null
-    }
-
-
     $candidates =
         @()
-
 
     foreach ($entry in $tree) {
 
         $process =
             $entry.Process
 
+        $name =
+            [string]$process.Name
 
         $commandLine =
             [string]$process.CommandLine
 
 
-        $processName =
-            [string]$process.Name
-
-
-        # ----------------------------------------------------
-        # Ignore Observer / detector / release helper processes
-        # ----------------------------------------------------
-
+        # Ignore our own helpers.
         if (
             $commandLine -match
             "(?i)Attach-CodexObserver|Watch-CodexSession|Watch-CodexRelease|Request-CodexRelease|Release-CodexSession|Stop-CodexObserver"
@@ -546,31 +463,20 @@ function Find-CodexProcess {
         }
 
 
-        # ----------------------------------------------------
-        # Detect Codex CLI
-        # ----------------------------------------------------
-
-        $nameLooksLikeCodex =
-            $processName -match
-            "(?i)^codex(?:\.exe)?$"
-
-
-        $commandLooksLikeCodex =
-            $commandLine -match
-            '(?i)(@openai[\\/]+codex[\\/]|[\\/]codex\.js(?:["\s]|$)|[\\/]codex(?:\.cmd|\.ps1|\.exe)(?:["\s]|$))'
+        $looksLikeCodex =
+            (
+                $name -match
+                "(?i)^codex(?:\.exe)?$"
+            ) -or (
+                $commandLine -match
+                '(?i)(@openai[\\/]+codex[\\/]|[\\/]codex\.js(?:["\s]|$)|[\\/]codex(?:\.cmd|\.ps1|\.exe)(?:["\s]|$))'
+            )
 
 
-        if (
-            -not $nameLooksLikeCodex -and
-            -not $commandLooksLikeCodex
-        ) {
+        if (-not $looksLikeCodex) {
             continue
         }
 
-
-        # ----------------------------------------------------
-        # CreationDate compatibility
-        # ----------------------------------------------------
 
         $createdUtc =
             Convert-CreationDateToUtc `
@@ -578,22 +484,11 @@ function Find-CodexProcess {
 
 
         if (-not $createdUtc) {
-
-            Write-Log (
-                "Could not parse CreationDate: " +
-                "PID=$($process.ProcessId) " +
-                "Name=$processName " +
-                "Value=$($process.CreationDate)"
-            )
-
             continue
         }
 
 
-        # ----------------------------------------------------
-        # Avoid selecting an older Codex process
-        # ----------------------------------------------------
-
+        # Do not accidentally attach to an older Codex process.
         if (
             $createdUtc -lt
             $LaunchUtc.AddSeconds(-3)
@@ -612,7 +507,7 @@ function Find-CodexProcess {
                     [int]$process.ParentProcessId
 
                 Name =
-                    $processName
+                    $name
 
                 CommandLine =
                     $commandLine
@@ -626,20 +521,17 @@ function Find-CodexProcess {
     }
 
 
-    if (-not $candidates) {
+    if ($candidates.Count -eq 0) {
         return $null
     }
 
 
-    # Prefer the Codex process closest to owner PowerShell.
+    # Typical:
     #
-    # With:
+    # powershell.exe
+    # └─ node.exe       <- choose this
+    #    └─ codex.exe
     #
-    # powershell
-    #   └─ node.exe
-    #       └─ codex.exe
-    #
-    # node.exe is selected.
     return (
         $candidates |
         Sort-Object `
@@ -651,14 +543,9 @@ function Find-CodexProcess {
 }
 
 
-# ============================================================
-# Diagnostic process-tree logging
-# ============================================================
-
 function Write-ProcessTreeDebug {
 
     param(
-        [Parameter(Mandatory = $true)]
         [int]$OwnerPid
     )
 
@@ -666,23 +553,10 @@ function Write-ProcessTreeDebug {
         Get-ChildProcessTree `
             -RootPid $OwnerPid
 
-
-    if (-not $tree) {
-
-        Write-Log (
-            "Process tree for owner PID " +
-            "$OwnerPid is empty."
-        )
-
-        return
-    }
-
-
     foreach ($entry in $tree) {
 
         $process =
             $entry.Process
-
 
         Write-Log (
             "TREE " +
@@ -697,27 +571,176 @@ function Write-ProcessTreeDebug {
 
 
 # ============================================================
-# Check whether Session already has healthy Observer
+# Rollout metadata
+#
+# session_meta gives us the canonical Session ID.
+#
+# For resumed sessions, the latest cwd may appear in
+# turn_context or thread_settings_applied, so inspect the tail
+# as well as session_meta.
+# ============================================================
+
+function Get-RolloutMetadata {
+
+    param(
+        [string]$RolloutPath
+    )
+
+    $sessionId =
+        $null
+
+    $cwd =
+        $null
+
+
+    try {
+
+        $head =
+            Get-Content `
+                -Path $RolloutPath `
+                -TotalCount 100 `
+                -Encoding UTF8 `
+                -ErrorAction Stop
+
+
+        foreach ($line in $head) {
+
+            try {
+                $event =
+                    $line |
+                    ConvertFrom-Json
+            }
+            catch {
+                continue
+            }
+
+
+            if (
+                [string]$event.type -ne
+                "session_meta"
+            ) {
+                continue
+            }
+
+
+            if ($event.payload.session_id) {
+
+                $sessionId =
+                    [string]$event.payload.session_id
+
+            }
+            elseif ($event.payload.id) {
+
+                $sessionId =
+                    [string]$event.payload.id
+            }
+
+
+            if ($event.payload.cwd) {
+
+                $cwd =
+                    [string]$event.payload.cwd
+            }
+
+
+            break
+        }
+
+
+        if (-not $sessionId) {
+            return $null
+        }
+
+
+        # Inspect recent events for the latest cwd.
+        $tail =
+            Get-Content `
+                -Path $RolloutPath `
+                -Tail 200 `
+                -Encoding UTF8 `
+                -ErrorAction SilentlyContinue
+
+
+        foreach ($line in $tail) {
+
+            try {
+                $event =
+                    $line |
+                    ConvertFrom-Json
+            }
+            catch {
+                continue
+            }
+
+
+            if (
+                [string]$event.type -eq
+                "turn_context"
+            ) {
+
+                if ($event.payload.cwd) {
+                    $cwd =
+                        [string]$event.payload.cwd
+                }
+            }
+
+
+            if (
+                [string]$event.type -eq
+                "event_msg" -and
+                $event.payload.thread_settings
+            ) {
+
+                if (
+                    $event.payload.
+                    thread_settings.cwd
+                ) {
+
+                    $cwd =
+                        [string]$event.payload.
+                        thread_settings.cwd
+                }
+            }
+        }
+
+
+        return (
+            [pscustomobject]@{
+
+                SessionId =
+                    $sessionId
+
+                Cwd =
+                    $cwd
+            }
+        )
+
+    }
+    catch {
+
+        return $null
+    }
+}
+
+
+# ============================================================
+# Observer health
 # ============================================================
 
 function Test-FreshObserver {
 
     param(
-        [Parameter(Mandatory = $true)]
         [string]$SessionId
     )
-
 
     $statusFile =
         Join-Path `
             $monitorHome `
             "status-$SessionId.json"
 
-
     $status =
         Read-JsonFile `
             -Path $statusFile
-
 
     if (-not $status) {
         return $false
@@ -725,7 +748,7 @@ function Test-FreshObserver {
 
 
     if (
-        $status.observerState -ne
+        [string]$status.observerState -ne
         "Running"
     ) {
         return $false
@@ -785,34 +808,26 @@ function Test-FreshObserver {
 
 
 # ============================================================
-# Atomically claim a Session
-#
-# Critical for multiple codex3 terminals.
+# Claim
 # ============================================================
 
 function Try-ClaimSession {
 
     param(
-        [Parameter(Mandatory = $true)]
         [string]$SessionId,
 
-        [Parameter(Mandatory = $true)]
         [string]$CurrentLaunchId,
 
-        [Parameter(Mandatory = $true)]
-        [int]$CurrentOwnerPid
-    )
+        [int]$CurrentOwnerPid,
 
+        [int]$CurrentCodexPid
+    )
 
     $claimPath =
         Join-Path `
             $claimDir `
             "$SessionId.claim"
 
-
-    # --------------------------------------------------------
-    # Healthy Observer means Session is already owned
-    # --------------------------------------------------------
 
     if (
         Test-FreshObserver `
@@ -822,11 +837,15 @@ function Try-ClaimSession {
     }
 
 
-    # --------------------------------------------------------
-    # Existing claim handling
-    # --------------------------------------------------------
-
     if (Test-Path $claimPath) {
+
+        $existing =
+            Read-JsonFile `
+                -Path $claimPath
+
+        $claimAge =
+            [double]::PositiveInfinity
+
 
         try {
 
@@ -835,108 +854,77 @@ function Try-ClaimSession {
                     $claimPath `
                     -ErrorAction Stop
 
-
             $claimAge =
                 (
                     (Get-Date).ToUniversalTime() -
                     $claimInfo.LastWriteTimeUtc
                 ).TotalSeconds
 
-
-            $existingClaim =
-                Read-JsonFile `
-                    -Path $claimPath
-
-
-            # Already belongs to this detector
-            if (
-                $existingClaim -and
-                $existingClaim.launchId -eq
-                $CurrentLaunchId
-            ) {
-
-                return $true
-            }
-
-
-            # Existing Observer is still alive
-            if (
-                $existingClaim -and
-                $existingClaim.observerPid
-            ) {
-
-                if (
-                    Test-ProcessAlive `
-                        -ProcessId (
-                            [int]$existingClaim.observerPid
-                        )
-                ) {
-                    return $false
-                }
-            }
-
-
-            # Existing Release Agent is still alive
-            if (
-                $existingClaim -and
-                $existingClaim.releaseAgentPid
-            ) {
-
-                if (
-                    Test-ProcessAlive `
-                        -ProcessId (
-                            [int]$existingClaim.releaseAgentPid
-                        )
-                ) {
-                    return $false
-                }
-            }
-
-
-            # Fresh claim from another detector
-            if (
-                $claimAge -lt
-                $ClaimStaleSeconds
-            ) {
-                return $false
-            }
-
-
-            # Stale claim
-            Write-Log (
-                "Removing stale claim: " +
-                "Session=$SessionId " +
-                "Age=" +
-                [math]::Round(
-                    $claimAge,
-                    1
-                ) +
-                "s"
-            )
-
-
-            Remove-Item `
-                $claimPath `
-                -Force `
-                -ErrorAction Stop
-
         }
         catch {
+        }
 
-            Write-Log (
-                "Unable to inspect/remove claim " +
-                "$claimPath : " +
-                $_.Exception.Message
-            )
 
+        if (
+            $existing -and
+            [string]$existing.launchId -eq
+            $CurrentLaunchId
+        ) {
+            return $true
+        }
+
+
+        # A different live launch owns this Session.
+        if ($existing) {
+
+            foreach (
+                $pidValue in @(
+                    $existing.observerPid,
+                    $existing.codexRootPid,
+                    $existing.ownerPowerShellPid
+                )
+            ) {
+
+                if (-not $pidValue) {
+                    continue
+                }
+
+                if (
+                    Test-ProcessAlive `
+                        -ProcessId ([int]$pidValue)
+                ) {
+                    return $false
+                }
+            }
+        }
+
+
+        if (
+            $claimAge -lt
+            $ClaimStaleSeconds
+        ) {
             return $false
         }
+
+
+        Write-Log (
+            "Removing stale claim: " +
+            "Session=$SessionId " +
+            "Age=" +
+            [math]::Round(
+                $claimAge,
+                1
+            ) +
+            "s"
+        )
+
+
+        Remove-Item `
+            $claimPath `
+            -Force `
+            -ErrorAction SilentlyContinue
     }
 
-
-    # --------------------------------------------------------
-    # Atomic file creation
-    # --------------------------------------------------------
 
     try {
 
@@ -957,11 +945,11 @@ function Try-ClaimSession {
     }
 
 
-    $claimRecord =
+    $claim =
         [ordered]@{
 
             version =
-                3
+                4
 
             launchId =
                 $CurrentLaunchId
@@ -972,6 +960,9 @@ function Try-ClaimSession {
             ownerPowerShellPid =
                 $CurrentOwnerPid
 
+            codexRootPid =
+                $CurrentCodexPid
+
             claimedAt =
                 (Get-Date).ToString("o")
         }
@@ -981,7 +972,7 @@ function Try-ClaimSession {
 
         Write-JsonNoBom `
             -Path $claimPath `
-            -Value $claimRecord
+            -Value $claim
 
     }
     catch {
@@ -1025,23 +1016,6 @@ if (-not (Test-Path $ReleaseAgentScript)) {
 }
 
 
-$owner =
-    Get-Process `
-        -Id $OwnerPowerShellPid `
-        -ErrorAction SilentlyContinue
-
-
-if (-not $owner) {
-
-    Write-Log (
-        "Owner PowerShell PID " +
-        "$OwnerPowerShellPid does not exist."
-    )
-
-    exit 1
-}
-
-
 $sessionRoot =
     Join-Path `
         $CodexHome `
@@ -1057,10 +1031,6 @@ if (-not (Test-Path $sessionRoot)) {
 
     exit 1
 }
-
-
-$targetCwd =
-    Normalize-Path $Cwd
 
 
 try {
@@ -1085,19 +1055,9 @@ catch {
 $launchUtc =
     $launch.UtcDateTime
 
-
-$deadline =
-    (Get-Date).AddSeconds(
-        $TimeoutSeconds
-    )
-
-
-$nextProgressLog =
-    (Get-Date).AddSeconds(10)
-
-
-$processTreeLogged =
-    $false
+$targetCwd =
+    Normalize-Path `
+        $Cwd
 
 
 Write-Log "============================================================"
@@ -1109,92 +1069,201 @@ Write-Log "NormalizedCWD=$targetCwd"
 Write-Log "CODEX_HOME=$CodexHome"
 Write-Log "SessionRoot=$sessionRoot"
 Write-Log "LaunchUtc=$($launchUtc.ToString("o"))"
-Write-Log "Waiting for Codex process + Session..."
 
 
 # ============================================================
-# Discovery loop
+# Phase 1
+#
+# Wait for the Codex process.
+#
+# This phase has a finite timeout because if Codex itself
+# failed to start there is nothing useful to monitor.
 # ============================================================
+
+Write-Log "Waiting for Codex process..."
+
+
+$processDeadline =
+    (Get-Date).AddSeconds(
+        $TimeoutSeconds
+    )
+
+$nextProgressLog =
+    (Get-Date).AddSeconds(
+        $ProgressLogSeconds
+    )
+
+$processTreeLogged =
+    $false
 
 $codexProcess =
     $null
 
 
-while ((Get-Date) -lt $deadline) {
+while (
+    (Get-Date) -lt
+    $processDeadline
+) {
+
+    if (
+        -not (
+            Test-ProcessAlive `
+                -ProcessId $OwnerPowerShellPid
+        )
+    ) {
+
+        Write-Log (
+            "Owner PowerShell exited before Codex was discovered."
+        )
+
+        exit 0
+    }
 
 
-    # ========================================================
-    # 1. Discover Codex process
-    # ========================================================
-
-    if (-not $codexProcess) {
-
-        $codexProcess =
-            Find-CodexProcess `
-                -OwnerPid $OwnerPowerShellPid `
-                -LaunchUtc $launchUtc
+    $codexProcess =
+        Find-CodexProcess `
+            -OwnerPid $OwnerPowerShellPid `
+            -LaunchUtc $launchUtc
 
 
-        if ($codexProcess) {
-
-            Write-Log (
-                "Codex process discovered: " +
-                "PID=$($codexProcess.ProcessId) " +
-                "ParentPID=$($codexProcess.ParentProcessId) " +
-                "Depth=$($codexProcess.Depth) " +
-                "Name=$($codexProcess.Name)"
-            )
+    if ($codexProcess) {
+        break
+    }
 
 
-            Write-Log (
-                "Codex command: " +
-                $codexProcess.CommandLine
-            )
+    if (
+        (Get-Date) -ge
+        $nextProgressLog
+    ) {
+
+        Write-Log (
+            "Still waiting for Codex process..."
+        )
+
+
+        if (-not $processTreeLogged) {
+
+            Write-ProcessTreeDebug `
+                -OwnerPid $OwnerPowerShellPid
+
+            $processTreeLogged =
+                $true
         }
+
+
+        $nextProgressLog =
+            (Get-Date).AddSeconds(
+                $ProgressLogSeconds
+            )
+    }
+
+
+    Start-Sleep `
+        -Milliseconds $PollMilliseconds
+}
+
+
+if (-not $codexProcess) {
+
+    Write-Log (
+        "Timed out waiting for Codex process."
+    )
+
+    exit 2
+}
+
+
+Write-Log (
+    "Codex process discovered: " +
+    "PID=$($codexProcess.ProcessId) " +
+    "ParentPID=$($codexProcess.ParentProcessId) " +
+    "Depth=$($codexProcess.Depth) " +
+    "Name=$($codexProcess.Name)"
+)
+
+Write-Log (
+    "Codex command: " +
+    $codexProcess.CommandLine
+)
+
+
+# ============================================================
+# Phase 2
+#
+# Wait for the Session/rollout.
+#
+# IMPORTANT:
+#
+# There is intentionally NO fixed timeout here.
+#
+# Codex may be started and sit at the TUI for many minutes
+# before the first prompt causes the rollout to become
+# discoverable.
+#
+# We continue waiting for as long as THIS Codex process and
+# its owner PowerShell are still alive.
+# ============================================================
+
+Write-Log (
+    "Codex process found. Waiting for matching Session/rollout."
+)
+
+$nextProgressLog =
+    (Get-Date).AddSeconds(
+        $ProgressLogSeconds
+    )
+
+
+while ($true) {
+
+
+    # --------------------------------------------------------
+    # Owner PowerShell gone
+    # --------------------------------------------------------
+
+    if (
+        -not (
+            Test-ProcessAlive `
+                -ProcessId $OwnerPowerShellPid
+        )
+    ) {
+
+        Write-Log (
+            "Owner PowerShell exited while waiting for Session."
+        )
+
+        exit 0
     }
 
 
     # --------------------------------------------------------
-    # Do NOT claim Session until Codex PID is known
+    # Codex gone / PID reused
     # --------------------------------------------------------
 
-    if (-not $codexProcess) {
+    if (
+        -not (
+            Test-SameProcess `
+                -ProcessId $codexProcess.ProcessId `
+                -ExpectedCreatedUtc $codexProcess.CreatedUtc
+        )
+    ) {
 
-        if (
-            (Get-Date) -ge
-            $nextProgressLog
-        ) {
+        Write-Log (
+            "Codex process exited or PID changed while waiting for Session."
+        )
 
-            Write-Log (
-                "Still waiting for Codex process..."
-            )
-
-
-            if (-not $processTreeLogged) {
-
-                Write-ProcessTreeDebug `
-                    -OwnerPid $OwnerPowerShellPid
-
-                $processTreeLogged =
-                    $true
-            }
-
-
-            $nextProgressLog =
-                (Get-Date).AddSeconds(10)
-        }
-
-
-        Start-Sleep `
-            -Milliseconds 400
-
-        continue
+        exit 0
     }
 
 
-    # ========================================================
-    # 2. Discover rollout / Session
-    # ========================================================
+    # --------------------------------------------------------
+    # Candidate rollout files
+    #
+    # A resumed Session may use an older rollout file, but its
+    # LastWriteTimeUtc will move forward when Codex writes new
+    # activity. Therefore filter on LastWriteTimeUtc rather
+    # than creation time.
+    # --------------------------------------------------------
 
     $candidates =
         Get-ChildItem `
@@ -1206,7 +1275,7 @@ while ((Get-Date) -lt $deadline) {
         Where-Object {
 
             $_.LastWriteTimeUtc -ge
-                $launchUtc.AddSeconds(-3)
+            $launchUtc.AddSeconds(-5)
 
         } |
         Sort-Object `
@@ -1216,9 +1285,8 @@ while ((Get-Date) -lt $deadline) {
 
     foreach ($file in $candidates) {
 
-
         $meta =
-            Get-SessionMetadata `
+            Get-RolloutMetadata `
                 -RolloutPath $file.FullName
 
 
@@ -1241,18 +1309,24 @@ while ((Get-Date) -lt $deadline) {
 
 
         $sessionId =
-            $meta.SessionId
+            [string]$meta.SessionId
 
 
-        # ====================================================
-        # 3. Claim Session
-        # ====================================================
+        if (
+            [string]::IsNullOrWhiteSpace(
+                $sessionId
+            )
+        ) {
+            continue
+        }
+
 
         $claimed =
             Try-ClaimSession `
                 -SessionId $sessionId `
                 -CurrentLaunchId $LaunchId `
-                -CurrentOwnerPid $OwnerPowerShellPid
+                -CurrentOwnerPid $OwnerPowerShellPid `
+                -CurrentCodexPid $codexProcess.ProcessId
 
 
         if (-not $claimed) {
@@ -1267,7 +1341,7 @@ while ((Get-Date) -lt $deadline) {
 
 
         # ====================================================
-        # 4. Start Observer
+        # Start Observer
         # ====================================================
 
         $observerArgs =
@@ -1275,7 +1349,8 @@ while ((Get-Date) -lt $deadline) {
             "-ExecutionPolicy Bypass " +
             "-File `"$ObserverScript`" " +
             "-SessionId `"$sessionId`" " +
-            "-CodexHome `"$CodexHome`""
+            "-CodexHome `"$CodexHome`" " +
+            "-MonitorHome `"$monitorHome`""
 
 
         try {
@@ -1305,7 +1380,7 @@ while ((Get-Date) -lt $deadline) {
                 -ErrorAction SilentlyContinue
 
 
-            exit 1
+            exit 3
         }
 
 
@@ -1315,16 +1390,86 @@ while ((Get-Date) -lt $deadline) {
         )
 
 
-        # ====================================================
-        # 5. Start Local Release Agent
-        #
-        # This Agent runs under the same Windows security
-        # context as codex3 and the local Codex process.
-        # ====================================================
+        # ----------------------------------------------------
+        # Verify Observer survives startup and creates status.
+        # ----------------------------------------------------
 
-        $releaseAgent =
-            $null
+        $observerStatusPath =
+            Join-Path `
+                $monitorHome `
+                "status-$sessionId.json"
 
+
+        $observerReady =
+            $false
+
+
+        $observerDeadline =
+            (Get-Date).AddSeconds(5)
+
+
+        while (
+            (Get-Date) -lt
+            $observerDeadline
+        ) {
+
+            $observerAlive =
+                Test-ProcessAlive `
+                    -ProcessId $observer.Id
+
+
+            if (-not $observerAlive) {
+                break
+            }
+
+
+            if (
+                Test-Path $observerStatusPath
+            ) {
+
+                $observerReady =
+                    $true
+
+                break
+            }
+
+
+            Start-Sleep `
+                -Milliseconds 200
+        }
+
+
+        if (-not $observerReady) {
+
+            Write-Log (
+                "Observer failed startup verification. " +
+                "PID=$($observer.Id) " +
+                "StatusExists=$(Test-Path $observerStatusPath)"
+            )
+
+
+            Stop-Process `
+                -Id $observer.Id `
+                -Force `
+                -ErrorAction SilentlyContinue
+
+
+            Remove-Item `
+                (Join-Path `
+                    $claimDir `
+                    "$sessionId.claim"
+                ) `
+                -Force `
+                -ErrorAction SilentlyContinue
+
+
+            exit 4
+        }
+
+
+        # ====================================================
+        # Start Local Release Agent
+        # ====================================================
 
         $releaseAgentArgs =
             "-NoProfile " +
@@ -1368,7 +1513,7 @@ while ((Get-Date) -lt $deadline) {
                 -ErrorAction SilentlyContinue
 
 
-            exit 1
+            exit 5
         }
 
 
@@ -1379,24 +1524,14 @@ while ((Get-Date) -lt $deadline) {
 
 
         # ====================================================
-        # 6. Persist complete mapping
-        #
-        # Terminal PowerShell
-        #        ↓
-        # Codex root process
-        #        ↓
-        # Session
-        #        ↓
-        # Observer
-        #        ↓
-        # Release Agent
+        # Launch mapping
         # ====================================================
 
         $record =
             [ordered]@{
 
                 version =
-                    3
+                    4
 
                 launchId =
                     $LaunchId
@@ -1463,12 +1598,10 @@ while ((Get-Date) -lt $deadline) {
                 -Force `
                 -ErrorAction SilentlyContinue
 
-
             Stop-Process `
                 -Id $observer.Id `
                 -Force `
                 -ErrorAction SilentlyContinue
-
 
             Remove-Item `
                 (Join-Path `
@@ -1479,19 +1612,19 @@ while ((Get-Date) -lt $deadline) {
                 -ErrorAction SilentlyContinue
 
 
-            exit 1
+            exit 6
         }
 
 
         # ====================================================
-        # 7. Update claim with active process IDs
+        # Update claim with active process IDs
         # ====================================================
 
         $claimRecord =
             [ordered]@{
 
                 version =
-                    3
+                    4
 
                 launchId =
                     $LaunchId
@@ -1530,7 +1663,7 @@ while ((Get-Date) -lt $deadline) {
         catch {
 
             Write-Log (
-                "Warning: failed updating claim: " +
+                "Warning: unable to update claim record: " +
                 $_.Exception.Message
             )
         }
@@ -1541,7 +1674,6 @@ while ((Get-Date) -lt $deadline) {
             $launchFile
         )
 
-
         Write-Log (
             "Attach completed."
         )
@@ -1551,9 +1683,9 @@ while ((Get-Date) -lt $deadline) {
     }
 
 
-    # ========================================================
-    # Progress logging
-    # ========================================================
+    # --------------------------------------------------------
+    # Progress
+    # --------------------------------------------------------
 
     if (
         (Get-Date) -ge
@@ -1561,23 +1693,18 @@ while ((Get-Date) -lt $deadline) {
     ) {
 
         Write-Log (
-            "Codex PID=$($codexProcess.ProcessId) found; " +
+            "Codex PID=$($codexProcess.ProcessId) is alive; " +
             "still waiting for matching rollout Session..."
         )
 
 
         $nextProgressLog =
-            (Get-Date).AddSeconds(10)
+            (Get-Date).AddSeconds(
+                $ProgressLogSeconds
+            )
     }
 
 
     Start-Sleep `
-        -Milliseconds 400
+        -Milliseconds $PollMilliseconds
 }
-
-
-Write-Log (
-    "Timed out waiting for Codex process / matching Session."
-)
-
-exit 2

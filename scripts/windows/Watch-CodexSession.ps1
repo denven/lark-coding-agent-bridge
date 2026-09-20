@@ -52,7 +52,7 @@ New-Item `
 
 
 # ============================================================
-# Helpers
+# Logging
 # ============================================================
 
 function Write-Log {
@@ -65,17 +65,19 @@ function Write-Log {
 
         Add-Content `
             -Path $logPath `
-            -Value (
-                "$(Get-Date -Format o) $Message"
-            ) `
+            -Value "$(Get-Date -Format o) $Message" `
             -Encoding UTF8
 
     }
     catch {
-        # Logging must never stop the observer.
+        # Logging must never stop Observer.
     }
 }
 
+
+# ============================================================
+# JSON
+# ============================================================
 
 function Write-JsonAtomic {
 
@@ -89,7 +91,7 @@ function Write-JsonAtomic {
 
     $json =
         $Value |
-        ConvertTo-Json -Depth 30
+        ConvertTo-Json -Depth 40
 
     $utf8 =
         New-Object `
@@ -98,11 +100,13 @@ function Write-JsonAtomic {
     $tempPath =
         "$Path.$PID.tmp"
 
+
     [System.IO.File]::WriteAllText(
         $tempPath,
         $json,
         $utf8
     )
+
 
     try {
 
@@ -134,10 +138,15 @@ function Write-JsonAtomic {
 }
 
 
+# ============================================================
+# Generic helpers
+# ============================================================
+
 function Get-PropertyValue {
 
     param(
         [object]$Object,
+
         [string]$Name
     )
 
@@ -156,26 +165,22 @@ function Get-PropertyValue {
 }
 
 
-function Get-FirstNumber {
+function Convert-ToLongOrNull {
 
     param(
-        [object[]]$Values
+        [object]$Value
     )
 
-    foreach ($value in $Values) {
-
-        if ($null -eq $value) {
-            continue
-        }
-
-        try {
-            return [long]$value
-        }
-        catch {
-        }
+    if ($null -eq $Value) {
+        return $null
     }
 
-    return $null
+    try {
+        return [long]$Value
+    }
+    catch {
+        return $null
+    }
 }
 
 
@@ -197,9 +202,7 @@ function Get-ProjectName {
 
         return (
             Split-Path `
-                $Path.TrimEnd(
-                    "\", "/"
-                ) `
+                $Path.TrimEnd("\", "/") `
                 -Leaf
         )
 
@@ -221,12 +224,14 @@ function Convert-PermissionProfile {
         return $null
     }
 
+
     $type =
         [string](
             Get-PropertyValue `
                 -Object $PermissionProfile `
                 -Name "type"
         )
+
 
     if (
         [string]::IsNullOrWhiteSpace(
@@ -236,9 +241,8 @@ function Convert-PermissionProfile {
         return $null
     }
 
-    switch (
-        $type.ToLowerInvariant()
-    ) {
+
+    switch ($type.ToLowerInvariant()) {
 
         "disabled" {
             return "Full Access"
@@ -260,7 +264,7 @@ function Convert-PermissionProfile {
 
 
 # ============================================================
-# Rollout discovery
+# Find rollout
 # ============================================================
 
 function Find-RolloutPath {
@@ -272,27 +276,31 @@ function Find-RolloutPath {
     $deadline =
         (Get-Date).AddSeconds(30)
 
+
     while ((Get-Date) -lt $deadline) {
 
-        $match =
+        $file =
             Get-ChildItem `
                 $sessionRoot `
                 -Recurse `
-                -File `
                 -Filter "rollout-*$Id*.jsonl" `
+                -File `
                 -ErrorAction SilentlyContinue |
             Sort-Object `
                 LastWriteTimeUtc `
                 -Descending |
             Select-Object -First 1
 
-        if ($match) {
-            return $match.FullName
+
+        if ($file) {
+            return $file.FullName
         }
+
 
         Start-Sleep `
             -Milliseconds 300
     }
+
 
     return $null
 }
@@ -301,26 +309,28 @@ function Find-RolloutPath {
 # ============================================================
 # Thread name
 #
-# session_index.jsonl is append-only:
-#
-# {
-#   "id": "...",
-#   "thread_name": "...",
-#   "updated_at": "..."
-# }
-#
-# One Session may appear multiple times after renaming.
-# Always choose the newest updated_at.
+# session_index.jsonl is append-only.
+# Same Session ID may have multiple rename records.
+# Latest updated_at wins.
 # ============================================================
 
 function Get-LatestThreadInfo {
 
-    if (-not (Test-Path $sessionIndexPath)) {
+    if (
+        -not (
+            Test-Path $sessionIndexPath
+        )
+    ) {
         return $null
     }
 
-    $stream = $null
-    $reader = $null
+
+    $stream =
+        $null
+
+    $reader =
+        $null
+
 
     try {
 
@@ -332,13 +342,14 @@ function Get-LatestThreadInfo {
                 [System.IO.FileShare]::ReadWrite
             )
 
+
         $reader =
-            New-Object `
-                System.IO.StreamReader(
-                    $stream,
-                    [System.Text.Encoding]::UTF8,
-                    $true
-                )
+            [System.IO.StreamReader]::new(
+                $stream,
+                [System.Text.Encoding]::UTF8,
+                $true
+            )
+
 
         $bestRecord =
             $null
@@ -346,11 +357,12 @@ function Get-LatestThreadInfo {
         $bestTime =
             [datetimeoffset]::MinValue
 
+        $bestLineNumber =
+            -1
+
         $lineNumber =
             0
 
-        $bestLineNumber =
-            -1
 
         while (
             $null -ne (
@@ -361,6 +373,7 @@ function Get-LatestThreadInfo {
 
             $lineNumber++
 
+
             if (
                 [string]::IsNullOrWhiteSpace(
                     $line
@@ -368,6 +381,7 @@ function Get-LatestThreadInfo {
             ) {
                 continue
             }
+
 
             try {
 
@@ -380,6 +394,7 @@ function Get-LatestThreadInfo {
                 continue
             }
 
+
             if (
                 [string]$record.id -ne
                 $SessionId
@@ -387,8 +402,10 @@ function Get-LatestThreadInfo {
                 continue
             }
 
+
             $updated =
                 [datetimeoffset]::MinValue
+
 
             try {
 
@@ -400,6 +417,7 @@ function Get-LatestThreadInfo {
             }
             catch {
             }
+
 
             if (
                 $updated -gt $bestTime -or
@@ -420,9 +438,25 @@ function Get-LatestThreadInfo {
             }
         }
 
+
         if (-not $bestRecord) {
             return $null
         }
+
+
+        $updatedAt =
+            $null
+
+
+        if (
+            $bestTime -ne
+            [datetimeoffset]::MinValue
+        ) {
+
+            $updatedAt =
+                $bestTime.ToString("o")
+        }
+
 
         return (
             [pscustomobject]@{
@@ -431,15 +465,7 @@ function Get-LatestThreadInfo {
                     [string]$bestRecord.thread_name
 
                 UpdatedAt =
-                    if (
-                        $bestTime -ne
-                        [datetimeoffset]::MinValue
-                    ) {
-                        $bestTime.ToString("o")
-                    }
-                    else {
-                        $null
-                    }
+                    $updatedAt
             }
         )
 
@@ -468,7 +494,243 @@ function Get-LatestThreadInfo {
 
 
 # ============================================================
-# Token usage helpers
+# Status model
+# ============================================================
+
+$status =
+    [ordered]@{
+
+        version =
+            6
+
+        sessionId =
+            $SessionId
+
+        threadName =
+            $null
+
+        threadNameUpdatedAt =
+            $null
+
+
+        projectName =
+            $null
+
+        cwd =
+            $null
+
+        rolloutPath =
+            $null
+
+
+        cliVersion =
+            $null
+
+
+        model =
+            $null
+
+        reasoningEffort =
+            $null
+
+        modelProvider =
+            $null
+
+
+        permissions =
+            $null
+
+        approvalPolicy =
+            $null
+
+        collaborationMode =
+            $null
+
+        personality =
+            $null
+
+
+        tokenUsage =
+            [ordered]@{
+
+                total =
+                    $null
+
+                input =
+                    $null
+
+                cachedInput =
+                    $null
+
+                output =
+                    $null
+
+                reasoningOutput =
+                    $null
+            }
+
+
+        contextWindow =
+            [ordered]@{
+
+                used =
+                    $null
+
+                total =
+                    $null
+
+                percentLeft =
+                    $null
+            }
+
+
+        state =
+            "Starting"
+
+        lastActivity =
+            "Observer attached"
+
+        lastEventType =
+            $null
+
+        lastEventTime =
+            $null
+
+
+        observerPid =
+            $PID
+
+        observerState =
+            "Running"
+
+        observerStartedAt =
+            (Get-Date).ToString("o")
+
+        observerUpdatedAt =
+            (Get-Date).ToString("o")
+    }
+
+
+function Set-CurrentCwd {
+
+    param(
+        [string]$Value
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $Value
+        )
+    ) {
+        return
+    }
+
+
+    $status["cwd"] =
+        $Value
+
+
+    $status["projectName"] =
+        Get-ProjectName `
+            -Path $Value
+}
+
+
+function Write-Status {
+
+    $status["observerUpdatedAt"] =
+        (Get-Date).ToString("o")
+
+
+    Write-JsonAtomic `
+        -Path $statusPath `
+        -Value $status
+}
+
+
+# ============================================================
+# Thread name refresh
+# ============================================================
+
+$script:lastSessionIndexWriteUtc =
+    [datetime]::MinValue
+
+
+function Refresh-ThreadName {
+
+    param(
+        [switch]$Force
+    )
+
+
+    if (
+        -not (
+            Test-Path $sessionIndexPath
+        )
+    ) {
+        return
+    }
+
+
+    try {
+
+        $item =
+            Get-Item `
+                $sessionIndexPath `
+                -ErrorAction Stop
+
+
+        if (
+            -not $Force -and
+            $item.LastWriteTimeUtc -eq
+            $script:lastSessionIndexWriteUtc
+        ) {
+            return
+        }
+
+
+        $script:lastSessionIndexWriteUtc =
+            $item.LastWriteTimeUtc
+
+
+        $thread =
+            Get-LatestThreadInfo
+
+
+        if (-not $thread) {
+            return
+        }
+
+
+        if (
+            -not (
+                [string]::IsNullOrWhiteSpace(
+                    $thread.ThreadName
+                )
+            )
+        ) {
+
+            $status["threadName"] =
+                $thread.ThreadName
+        }
+
+
+        $status["threadNameUpdatedAt"] =
+            $thread.UpdatedAt
+
+    }
+    catch {
+
+        Write-Log (
+            "Unable to refresh Thread name: " +
+            $_.Exception.Message
+        )
+    }
+}
+
+
+# ============================================================
+# Usage parsing
 # ============================================================
 
 function Get-UsageSnapshot {
@@ -481,75 +743,101 @@ function Get-UsageSnapshot {
         return $null
     }
 
+
     $total =
-        Get-FirstNumber @(
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "total_tokens"
-            ),
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "total"
-            )
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Object `
+                -Name "total_tokens"
         )
+
+
+    if ($null -eq $total) {
+
+        $total =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $Object `
+                    -Name "total"
+            )
+    }
+
 
     $input =
-        Get-FirstNumber @(
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "input_tokens"
-            ),
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "input"
-            )
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Object `
+                -Name "input_tokens"
         )
+
+
+    if ($null -eq $input) {
+
+        $input =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $Object `
+                    -Name "input"
+            )
+    }
+
 
     $cachedInput =
-        Get-FirstNumber @(
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "cached_input_tokens"
-            ),
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "cached_input"
-            )
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Object `
+                -Name "cached_input_tokens"
         )
+
+
+    if ($null -eq $cachedInput) {
+
+        $cachedInput =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $Object `
+                    -Name "cached_input"
+            )
+    }
+
 
     $output =
-        Get-FirstNumber @(
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "output_tokens"
-            ),
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "output"
-            )
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Object `
+                -Name "output_tokens"
         )
 
-    $reasoningOutput =
-        Get-FirstNumber @(
-            (
+
+    if ($null -eq $output) {
+
+        $output =
+            Convert-ToLongOrNull (
                 Get-PropertyValue `
-                    $Object `
-                    "reasoning_output_tokens"
-            ),
-            (
-                Get-PropertyValue `
-                    $Object `
-                    "reasoning_tokens"
+                    -Object $Object `
+                    -Name "output"
             )
+    }
+
+
+    $reasoningOutput =
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Object `
+                -Name "reasoning_output_tokens"
         )
+
+
+    if ($null -eq $reasoningOutput) {
+
+        $reasoningOutput =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $Object `
+                    -Name "reasoning_tokens"
+            )
+    }
+
 
     if (
         $null -eq $total -and
@@ -560,6 +848,7 @@ function Get-UsageSnapshot {
     ) {
         return $null
     }
+
 
     return (
         [pscustomobject]@{
@@ -586,34 +875,66 @@ function Get-UsageSnapshot {
 function Apply-UsageSnapshot {
 
     param(
-        [object]$Snapshot,
-        [object]$Status
+        [object]$Snapshot
     )
 
-    if ($null -eq $Snapshot) {
+    if (-not $Snapshot) {
         return
     }
 
-    foreach (
-        $name in @(
-            "total",
-            "input",
-            "cachedInput",
-            "output",
-            "reasoningOutput"
-        )
-    ) {
 
-        $value =
-            Get-PropertyValue `
-                -Object $Snapshot `
-                -Name $name
+    $value =
+        Get-PropertyValue `
+            -Object $Snapshot `
+            -Name "total"
 
-        if ($null -ne $value) {
+    if ($null -ne $value) {
+        $status["tokenUsage"]["total"] =
+            [long]$value
+    }
 
-            $Status["tokenUsage"][$name] =
-                [long]$value
-        }
+
+    $value =
+        Get-PropertyValue `
+            -Object $Snapshot `
+            -Name "input"
+
+    if ($null -ne $value) {
+        $status["tokenUsage"]["input"] =
+            [long]$value
+    }
+
+
+    $value =
+        Get-PropertyValue `
+            -Object $Snapshot `
+            -Name "cachedInput"
+
+    if ($null -ne $value) {
+        $status["tokenUsage"]["cachedInput"] =
+            [long]$value
+    }
+
+
+    $value =
+        Get-PropertyValue `
+            -Object $Snapshot `
+            -Name "output"
+
+    if ($null -ne $value) {
+        $status["tokenUsage"]["output"] =
+            [long]$value
+    }
+
+
+    $value =
+        Get-PropertyValue `
+            -Object $Snapshot `
+            -Name "reasoningOutput"
+
+    if ($null -ne $value) {
+        $status["tokenUsage"]["reasoningOutput"] =
+            [long]$value
     }
 }
 
@@ -621,63 +942,55 @@ function Apply-UsageSnapshot {
 function Update-ContextWindow {
 
     param(
-        [object]$Status,
         [object]$Total,
+
         [object]$Used
     )
 
-    if ($null -ne $Total) {
 
-        try {
+    $totalValue =
+        Convert-ToLongOrNull $Total
 
-            $totalValue =
-                [long]$Total
 
-            if ($totalValue -gt 0) {
+    if (
+        $null -ne $totalValue -and
+        $totalValue -gt 0
+    ) {
 
-                $Status["contextWindow"]["total"] =
-                    $totalValue
-            }
-
-        }
-        catch {
-        }
+        $status["contextWindow"]["total"] =
+            $totalValue
     }
 
 
-    if ($null -ne $Used) {
+    $usedValue =
+        Convert-ToLongOrNull $Used
 
-        try {
 
-            $usedValue =
-                [long]$Used
+    if (
+        $null -ne $usedValue -and
+        $usedValue -ge 0
+    ) {
 
-            $knownTotal =
-                $Status["contextWindow"]["total"]
+        $knownTotal =
+            $status["contextWindow"]["total"]
 
-            if (
-                $usedValue -ge 0 -and
-                (
-                    $null -eq $knownTotal -or
-                    $usedValue -le [long]$knownTotal
-                )
-            ) {
 
-                $Status["contextWindow"]["used"] =
-                    $usedValue
-            }
+        if (
+            $null -eq $knownTotal -or
+            $usedValue -le [long]$knownTotal
+        ) {
 
-        }
-        catch {
+            $status["contextWindow"]["used"] =
+                $usedValue
         }
     }
 
 
     $finalTotal =
-        $Status["contextWindow"]["total"]
+        $status["contextWindow"]["total"]
 
     $finalUsed =
-        $Status["contextWindow"]["used"]
+        $status["contextWindow"]["used"]
 
 
     if (
@@ -688,26 +1001,25 @@ function Update-ContextWindow {
     ) {
 
         $left =
-            100.0 *
             (
-                [long]$finalTotal -
-                [long]$finalUsed
-            ) /
-            [long]$finalTotal
+                (
+                    [long]$finalTotal -
+                    [long]$finalUsed
+                ) /
+                [double]$finalTotal
+            ) * 100
 
-        $Status["contextWindow"]["percentLeft"] =
-            [int][math]::Round(
-                $left
-            )
+
+        $status["contextWindow"]["percentLeft"] =
+            [int][math]::Round($left)
     }
 }
 
 
-function Apply-TokenUsageRecord {
+function Apply-UsageContainer {
 
     param(
-        [object]$Payload,
-        [object]$Status
+        [object]$Payload
     )
 
     if ($null -eq $Payload) {
@@ -715,341 +1027,315 @@ function Apply-TokenUsageRecord {
     }
 
 
-    # --------------------------------------------------------
-    # Lifetime / thread cumulative token usage
-    # --------------------------------------------------------
-
-    $threadUsageObject =
-        Get-PropertyValue `
-            -Object $Payload `
-            -Name "thread_token_usage"
-
-
-    if ($null -eq $threadUsageObject) {
-
-        $usage =
-            Get-PropertyValue `
-                -Object $Payload `
-                -Name "usage"
-
-        if ($usage) {
-
-            $threadUsageObject =
-                Get-PropertyValue `
-                    -Object $usage `
-                    -Name "total_token_usage"
-        }
-    }
-
-
-    if ($null -eq $threadUsageObject) {
-
-        $threadUsageObject =
-            Get-PropertyValue `
-                -Object $Payload `
-                -Name "usage"
-    }
-
-
-    $threadSnapshot =
-        Get-UsageSnapshot `
-            -Object $threadUsageObject
-
-
-    Apply-UsageSnapshot `
-        -Snapshot $threadSnapshot `
-        -Status $Status
-
-
-    # --------------------------------------------------------
-    # Current context / latest turn usage
-    # --------------------------------------------------------
-
-    $turnUsageObject =
-        Get-PropertyValue `
-            -Object $Payload `
-            -Name "turn_token_usage"
-
-
-    if ($null -eq $turnUsageObject) {
-
-        $usage =
-            Get-PropertyValue `
-                -Object $Payload `
-                -Name "usage"
-
-        if ($usage) {
-
-            $turnUsageObject =
-                Get-PropertyValue `
-                    -Object $usage `
-                    -Name "last_token_usage"
-        }
-    }
-
-
-    $turnSnapshot =
-        Get-UsageSnapshot `
-            -Object $turnUsageObject
-
-
-    $contextUsed =
-        if ($turnSnapshot) {
-            $turnSnapshot.total
-        }
-        else {
-            $null
-        }
-
-
-    $usageObject =
+    $usage =
         Get-PropertyValue `
             -Object $Payload `
             -Name "usage"
 
 
+    $info =
+        Get-PropertyValue `
+            -Object $Payload `
+            -Name "info"
+
+
+    # --------------------------------------------------------
+    # Thread cumulative usage
+    # --------------------------------------------------------
+
+    $threadUsage =
+        Get-PropertyValue `
+            -Object $Payload `
+            -Name "thread_token_usage"
+
+
+    if (
+        $null -eq $threadUsage -and
+        $null -ne $usage
+    ) {
+
+        $threadUsage =
+            Get-PropertyValue `
+                -Object $usage `
+                -Name "total_token_usage"
+    }
+
+
+    if (
+        $null -eq $threadUsage -and
+        $null -ne $info
+    ) {
+
+        $threadUsage =
+            Get-PropertyValue `
+                -Object $info `
+                -Name "thread_token_usage"
+    }
+
+
+    if (
+        $null -eq $threadUsage -and
+        $null -ne $info
+    ) {
+
+        $threadUsage =
+            Get-PropertyValue `
+                -Object $info `
+                -Name "total_token_usage"
+    }
+
+
+    if (
+        $null -eq $threadUsage -and
+        $null -ne $usage
+    ) {
+
+        $threadUsage =
+            $usage
+    }
+
+
+    $threadSnapshot =
+        Get-UsageSnapshot `
+            -Object $threadUsage
+
+
+    Apply-UsageSnapshot `
+        -Snapshot $threadSnapshot
+
+
+    # --------------------------------------------------------
+    # Latest/current turn usage
+    # --------------------------------------------------------
+
+    $turnUsage =
+        Get-PropertyValue `
+            -Object $Payload `
+            -Name "turn_token_usage"
+
+
+    if (
+        $null -eq $turnUsage -and
+        $null -ne $usage
+    ) {
+
+        $turnUsage =
+            Get-PropertyValue `
+                -Object $usage `
+                -Name "last_token_usage"
+    }
+
+
+    if (
+        $null -eq $turnUsage -and
+        $null -ne $info
+    ) {
+
+        $turnUsage =
+            Get-PropertyValue `
+                -Object $info `
+                -Name "turn_token_usage"
+    }
+
+
+    if (
+        $null -eq $turnUsage -and
+        $null -ne $info
+    ) {
+
+        $turnUsage =
+            Get-PropertyValue `
+                -Object $info `
+                -Name "last_token_usage"
+    }
+
+
+    $turnSnapshot =
+        Get-UsageSnapshot `
+            -Object $turnUsage
+
+
+    # --------------------------------------------------------
+    # Context total
+    # --------------------------------------------------------
+
     $contextTotal =
-        if ($usageObject) {
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Payload `
+                -Name "model_context_window"
+        )
 
-            Get-FirstNumber @(
-                (
-                    Get-PropertyValue `
-                        $usageObject `
-                        "model_context_window"
-                ),
-                (
-                    Get-PropertyValue `
-                        $usageObject `
-                        "context_window"
-                )
+
+    if ($null -eq $contextTotal) {
+
+        $contextTotal =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $Payload `
+                    -Name "context_window"
             )
+    }
 
-        }
-        else {
-            $null
-        }
+
+    if (
+        $null -eq $contextTotal -and
+        $null -ne $usage
+    ) {
+
+        $contextTotal =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $usage `
+                    -Name "model_context_window"
+            )
+    }
+
+
+    if (
+        $null -eq $contextTotal -and
+        $null -ne $usage
+    ) {
+
+        $contextTotal =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $usage `
+                    -Name "context_window"
+            )
+    }
+
+
+    if (
+        $null -eq $contextTotal -and
+        $null -ne $info
+    ) {
+
+        $contextTotal =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $info `
+                    -Name "model_context_window"
+            )
+    }
+
+
+    if (
+        $null -eq $contextTotal -and
+        $null -ne $info
+    ) {
+
+        $contextTotal =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $info `
+                    -Name "context_window"
+            )
+    }
+
+
+    # --------------------------------------------------------
+    # Context used
+    # --------------------------------------------------------
+
+    $contextUsed =
+        Convert-ToLongOrNull (
+            Get-PropertyValue `
+                -Object $Payload `
+                -Name "context_used"
+        )
+
+
+    if ($null -eq $contextUsed) {
+
+        $contextUsed =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $Payload `
+                    -Name "context_tokens"
+            )
+    }
+
+
+    if (
+        $null -eq $contextUsed -and
+        $null -ne $usage
+    ) {
+
+        $contextUsed =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $usage `
+                    -Name "context_used"
+            )
+    }
+
+
+    if (
+        $null -eq $contextUsed -and
+        $null -ne $usage
+    ) {
+
+        $contextUsed =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $usage `
+                    -Name "context_tokens"
+            )
+    }
+
+
+    if (
+        $null -eq $contextUsed -and
+        $null -ne $info
+    ) {
+
+        $contextUsed =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $info `
+                    -Name "context_used"
+            )
+    }
+
+
+    if (
+        $null -eq $contextUsed -and
+        $null -ne $info
+    ) {
+
+        $contextUsed =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $info `
+                    -Name "context_tokens"
+            )
+    }
+
+
+    if (
+        $null -eq $contextUsed -and
+        $null -ne $turnSnapshot
+    ) {
+
+        $contextUsed =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $turnSnapshot `
+                    -Name "total"
+            )
+    }
 
 
     Update-ContextWindow `
-        -Status $Status `
         -Total $contextTotal `
         -Used $contextUsed
 }
 
 
 # ============================================================
-# Status object
+# Thread settings
 # ============================================================
-
-$status =
-    [ordered]@{
-
-        version =
-            4
-
-        sessionId =
-            $SessionId
-
-        threadName =
-            $null
-
-        threadNameUpdatedAt =
-            $null
-
-        projectName =
-            $null
-
-        cwd =
-            $null
-
-        rolloutPath =
-            $null
-
-        cliVersion =
-            $null
-
-        model =
-            $null
-
-        reasoningEffort =
-            $null
-
-        modelProvider =
-            $null
-
-        permissions =
-            $null
-
-        approvalPolicy =
-            $null
-
-        collaborationMode =
-            $null
-
-        personality =
-            $null
-
-        tokenUsage =
-            [ordered]@{
-
-                total =
-                    $null
-
-                input =
-                    $null
-
-                cachedInput =
-                    $null
-
-                output =
-                    $null
-
-                reasoningOutput =
-                    $null
-            }
-
-        contextWindow =
-            [ordered]@{
-
-                used =
-                    $null
-
-                total =
-                    $null
-
-                percentLeft =
-                    $null
-            }
-
-        state =
-            "Starting"
-
-        lastActivity =
-            "Observer attached"
-
-        lastEventType =
-            $null
-
-        lastEventTime =
-            $null
-
-        observerPid =
-            $PID
-
-        observerState =
-            "Running"
-
-        observerStartedAt =
-            (Get-Date).ToString("o")
-
-        observerUpdatedAt =
-            (Get-Date).ToString("o")
-    }
-
-
-function Write-Status {
-
-    $status["observerUpdatedAt"] =
-        (Get-Date).ToString("o")
-
-    Write-JsonAtomic `
-        -Path $statusPath `
-        -Value $status
-}
-
-
-# ============================================================
-# Thread-name refresh
-# ============================================================
-
-$script:lastSessionIndexWriteUtc =
-    [datetime]::MinValue
-
-
-function Refresh-ThreadName {
-
-    param(
-        [switch]$Force
-    )
-
-    if (-not (Test-Path $sessionIndexPath)) {
-        return
-    }
-
-    try {
-
-        $item =
-            Get-Item `
-                $sessionIndexPath `
-                -ErrorAction Stop
-
-        if (
-            -not $Force -and
-            $item.LastWriteTimeUtc -eq
-            $script:lastSessionIndexWriteUtc
-        ) {
-            return
-        }
-
-        $script:lastSessionIndexWriteUtc =
-            $item.LastWriteTimeUtc
-
-
-        $thread =
-            Get-LatestThreadInfo
-
-
-        if ($thread) {
-
-            if (
-                -not [string]::IsNullOrWhiteSpace(
-                    $thread.ThreadName
-                )
-            ) {
-
-                $status["threadName"] =
-                    $thread.ThreadName
-            }
-
-            $status["threadNameUpdatedAt"] =
-                $thread.UpdatedAt
-        }
-
-    }
-    catch {
-
-        Write-Log (
-            "Unable to refresh thread name: " +
-            $_.Exception.Message
-        )
-    }
-}
-
-
-# ============================================================
-# Event processing
-# ============================================================
-
-function Get-EventTimestamp {
-
-    param(
-        [object]$Event
-    )
-
-    $timestamp =
-        Get-PropertyValue `
-            -Object $Event `
-            -Name "timestamp"
-
-    if ($timestamp) {
-        return [string]$timestamp
-    }
-
-    return (
-        (Get-Date).ToString("o")
-    )
-}
-
 
 function Apply-ThreadSettings {
 
@@ -1064,8 +1350,8 @@ function Apply-ThreadSettings {
 
     $model =
         Get-PropertyValue `
-            $Settings `
-            "model"
+            -Object $Settings `
+            -Name "model"
 
     if ($model) {
         $status["model"] =
@@ -1075,8 +1361,16 @@ function Apply-ThreadSettings {
 
     $provider =
         Get-PropertyValue `
-            $Settings `
-            "model_provider_id"
+            -Object $Settings `
+            -Name "model_provider_id"
+
+    if (-not $provider) {
+
+        $provider =
+            Get-PropertyValue `
+                -Object $Settings `
+                -Name "model_provider"
+    }
 
     if ($provider) {
         $status["modelProvider"] =
@@ -1086,8 +1380,8 @@ function Apply-ThreadSettings {
 
     $reasoning =
         Get-PropertyValue `
-            $Settings `
-            "reasoning_effort"
+            -Object $Settings `
+            -Name "reasoning_effort"
 
     if ($reasoning) {
         $status["reasoningEffort"] =
@@ -1097,24 +1391,20 @@ function Apply-ThreadSettings {
 
     $cwd =
         Get-PropertyValue `
-            $Settings `
-            "cwd"
+            -Object $Settings `
+            -Name "cwd"
 
     if ($cwd) {
 
-        $status["cwd"] =
-            [string]$cwd
-
-        $status["projectName"] =
-            Get-ProjectName `
-                -Path ([string]$cwd)
+        Set-CurrentCwd `
+            -Value ([string]$cwd)
     }
 
 
     $approval =
         Get-PropertyValue `
-            $Settings `
-            "approval_policy"
+            -Object $Settings `
+            -Name "approval_policy"
 
     if ($approval) {
         $status["approvalPolicy"] =
@@ -1122,23 +1412,23 @@ function Apply-ThreadSettings {
     }
 
 
-    $permissionProfile =
+    $permission =
         Get-PropertyValue `
-            $Settings `
-            "permission_profile"
+            -Object $Settings `
+            -Name "permission_profile"
 
-    if ($permissionProfile) {
+    if ($permission) {
 
         $status["permissions"] =
             Convert-PermissionProfile `
-                -PermissionProfile $permissionProfile
+                -PermissionProfile $permission
     }
 
 
     $personality =
         Get-PropertyValue `
-            $Settings `
-            "personality"
+            -Object $Settings `
+            -Name "personality"
 
     if ($personality) {
         $status["personality"] =
@@ -1148,23 +1438,63 @@ function Apply-ThreadSettings {
 
     $collaboration =
         Get-PropertyValue `
-            $Settings `
-            "collaboration_mode"
+            -Object $Settings `
+            -Name "collaboration_mode"
 
     if ($collaboration) {
 
         $mode =
             Get-PropertyValue `
-                $collaboration `
-                "mode"
+                -Object $collaboration `
+                -Name "mode"
+
+        if (-not $mode) {
+
+            $mode =
+                Get-PropertyValue `
+                    -Object $collaboration `
+                    -Name "kind"
+        }
 
         if ($mode) {
+
             $status["collaborationMode"] =
                 [string]$mode
         }
     }
 }
 
+
+# ============================================================
+# Event timestamp
+# ============================================================
+
+function Get-EventTimestamp {
+
+    param(
+        [object]$Event
+    )
+
+    $timestamp =
+        Get-PropertyValue `
+            -Object $Event `
+            -Name "timestamp"
+
+
+    if ($timestamp) {
+        return [string]$timestamp
+    }
+
+
+    return (
+        (Get-Date).ToString("o")
+    )
+}
+
+
+# ============================================================
+# Event processor
+# ============================================================
 
 function Apply-Event {
 
@@ -1180,14 +1510,16 @@ function Apply-Event {
     $outerType =
         [string](
             Get-PropertyValue `
-                $Event `
-                "type"
+                -Object $Event `
+                -Name "type"
         )
+
 
     $payload =
         Get-PropertyValue `
-            $Event `
-            "payload"
+            -Object $Event `
+            -Name "payload"
+
 
     $eventTime =
         Get-EventTimestamp `
@@ -1202,14 +1534,12 @@ function Apply-Event {
 
         $payloadType =
             Get-PropertyValue `
-                $payload `
-                "type"
+                -Object $payload `
+                -Name "type"
+
 
         if ($payloadType) {
 
-            # Important:
-            # ${outerType} is required because "$outerType:"
-            # is parsed by PowerShell as a scoped variable.
             $effectiveType =
                 "${outerType}:$payloadType"
         }
@@ -1227,30 +1557,32 @@ function Apply-Event {
     # session_meta
     # ========================================================
 
-    if ($outerType -eq "session_meta") {
+    if (
+        $outerType -eq
+        "session_meta"
+    ) {
 
         $cwd =
             Get-PropertyValue `
-                $payload `
-                "cwd"
+                -Object $payload `
+                -Name "cwd"
+
 
         if ($cwd) {
 
-            $status["cwd"] =
-                [string]$cwd
-
-            $status["projectName"] =
-                Get-ProjectName `
-                    -Path ([string]$cwd)
+            Set-CurrentCwd `
+                -Value ([string]$cwd)
         }
 
 
         $cliVersion =
             Get-PropertyValue `
-                $payload `
-                "cli_version"
+                -Object $payload `
+                -Name "cli_version"
+
 
         if ($cliVersion) {
+
             $status["cliVersion"] =
                 [string]$cliVersion
         }
@@ -1258,28 +1590,38 @@ function Apply-Event {
 
         $provider =
             Get-PropertyValue `
-                $payload `
-                "model_provider"
+                -Object $payload `
+                -Name "model_provider"
+
 
         if ($provider) {
+
             $status["modelProvider"] =
                 [string]$provider
         }
 
 
-        $contextWindow =
-            Get-FirstNumber @(
-                (
-                    Get-PropertyValue `
-                        $payload `
-                        "context_window"
-                )
+        $contextTotal =
+            Convert-ToLongOrNull (
+                Get-PropertyValue `
+                    -Object $payload `
+                    -Name "context_window"
             )
 
 
+        if ($null -eq $contextTotal) {
+
+            $contextTotal =
+                Convert-ToLongOrNull (
+                    Get-PropertyValue `
+                        -Object $payload `
+                        -Name "model_context_window"
+                )
+        }
+
+
         Update-ContextWindow `
-            -Status $status `
-            -Total $contextWindow `
+            -Total $contextTotal `
             -Used $null
 
 
@@ -1291,41 +1633,80 @@ function Apply-Event {
     # turn_context
     # ========================================================
 
-    if ($outerType -eq "turn_context") {
+    if (
+        $outerType -eq
+        "turn_context"
+    ) {
 
         $cwd =
             Get-PropertyValue `
-                $payload `
-                "cwd"
+                -Object $payload `
+                -Name "cwd"
+
 
         if ($cwd) {
 
-            $status["cwd"] =
-                [string]$cwd
-
-            $status["projectName"] =
-                Get-ProjectName `
-                    -Path ([string]$cwd)
+            Set-CurrentCwd `
+                -Value ([string]$cwd)
         }
 
 
         $model =
             Get-PropertyValue `
-                $payload `
-                "model"
+                -Object $payload `
+                -Name "model"
+
 
         if ($model) {
+
             $status["model"] =
                 [string]$model
         }
 
 
+        $reasoning =
+            Get-PropertyValue `
+                -Object $payload `
+                -Name "reasoning_effort"
+
+
+        if ($reasoning) {
+
+            $status["reasoningEffort"] =
+                [string]$reasoning
+        }
+
+
+        $provider =
+            Get-PropertyValue `
+                -Object $payload `
+                -Name "model_provider_id"
+
+
+        if (-not $provider) {
+
+            $provider =
+                Get-PropertyValue `
+                    -Object $payload `
+                    -Name "model_provider"
+        }
+
+
+        if ($provider) {
+
+            $status["modelProvider"] =
+                [string]$provider
+        }
+
+
         $approval =
             Get-PropertyValue `
-                $payload `
-                "approval_policy"
+                -Object $payload `
+                -Name "approval_policy"
+
 
         if ($approval) {
+
             $status["approvalPolicy"] =
                 [string]$approval
         }
@@ -1333,8 +1714,9 @@ function Apply-Event {
 
         $permission =
             Get-PropertyValue `
-                $payload `
-                "permission_profile"
+                -Object $payload `
+                -Name "permission_profile"
+
 
         if ($permission) {
 
@@ -1346,10 +1728,12 @@ function Apply-Event {
 
         $personality =
             Get-PropertyValue `
-                $payload `
-                "personality"
+                -Object $payload `
+                -Name "personality"
+
 
         if ($personality) {
+
             $status["personality"] =
                 [string]$personality
         }
@@ -1357,21 +1741,48 @@ function Apply-Event {
 
         $collaboration =
             Get-PropertyValue `
-                $payload `
-                "collaboration_mode"
+                -Object $payload `
+                -Name "collaboration_mode"
+
 
         if ($collaboration) {
 
             $mode =
                 Get-PropertyValue `
-                    $collaboration `
-                    "mode"
+                    -Object $collaboration `
+                    -Name "mode"
+
+            if (-not $mode) {
+
+                $mode =
+                    Get-PropertyValue `
+                        -Object $collaboration `
+                        -Name "kind"
+            }
 
             if ($mode) {
+
                 $status["collaborationMode"] =
                     [string]$mode
             }
         }
+
+
+        $collaborationKind =
+            Get-PropertyValue `
+                -Object $payload `
+                -Name "collaboration_mode_kind"
+
+
+        if ($collaborationKind) {
+
+            $status["collaborationMode"] =
+                [string]$collaborationKind
+        }
+
+
+        Apply-UsageContainer `
+            -Payload $payload
 
 
         $status["state"] =
@@ -1379,6 +1790,7 @@ function Apply-Event {
 
         $status["lastActivity"] =
             "Turn in progress"
+
 
         return
     }
@@ -1393,9 +1805,8 @@ function Apply-Event {
         "token_usage_record"
     ) {
 
-        Apply-TokenUsageRecord `
-            -Payload $payload `
-            -Status $status
+        Apply-UsageContainer `
+            -Payload $payload
 
         return
     }
@@ -1405,20 +1816,23 @@ function Apply-Event {
     # event_msg
     # ========================================================
 
-    if ($outerType -eq "event_msg") {
+    if (
+        $outerType -eq
+        "event_msg"
+    ) {
 
         $kind =
             [string](
                 Get-PropertyValue `
-                    $payload `
-                    "type"
+                    -Object $payload `
+                    -Name "type"
             )
 
 
         $threadSettings =
             Get-PropertyValue `
-                $payload `
-                "thread_settings"
+                -Object $payload `
+                -Name "thread_settings"
 
 
         if ($threadSettings) {
@@ -1428,23 +1842,8 @@ function Apply-Event {
         }
 
 
-        $modelContextWindow =
-            Get-FirstNumber @(
-                (
-                    Get-PropertyValue `
-                        $payload `
-                        "model_context_window"
-                )
-            )
-
-
-        if ($null -ne $modelContextWindow) {
-
-            Update-ContextWindow `
-                -Status $status `
-                -Total $modelContextWindow `
-                -Used $null
-        }
+        Apply-UsageContainer `
+            -Payload $payload
 
 
         switch -Regex ($kind) {
@@ -1461,7 +1860,7 @@ function Apply-Event {
             }
 
 
-            "^(task_complete|task_completed|turn_complete|turn_completed)$" {
+            "^(task_complete|task_completed|turn_complete|turn_completed|turn_end|turn_ended)$" {
 
                 $status["state"] =
                     "Waiting"
@@ -1497,9 +1896,14 @@ function Apply-Event {
             }
 
 
-            "thread_settings_applied" {
+            "^thread_settings_applied$" {
 
-                # Metadata update only.
+                break
+            }
+
+
+            "^(token_count|token_usage)$" {
+
                 break
             }
         }
@@ -1513,13 +1917,16 @@ function Apply-Event {
     # response_item
     # ========================================================
 
-    if ($outerType -eq "response_item") {
+    if (
+        $outerType -eq
+        "response_item"
+    ) {
 
         $itemType =
             [string](
                 Get-PropertyValue `
-                    $payload `
-                    "type"
+                    -Object $payload `
+                    -Name "type"
             )
 
 
@@ -1542,10 +1949,12 @@ function Apply-Event {
                 $status["state"] =
                     "Running"
 
+
                 $toolName =
                     Get-PropertyValue `
-                        $payload `
-                        "name"
+                        -Object $payload `
+                        -Name "name"
+
 
                 if ($toolName) {
 
@@ -1558,6 +1967,7 @@ function Apply-Event {
                     $status["lastActivity"] =
                         "Tool call"
                 }
+
 
                 break
             }
@@ -1580,9 +1990,10 @@ function Apply-Event {
                 $role =
                     [string](
                         Get-PropertyValue `
-                            $payload `
-                            "role"
+                            -Object $payload `
+                            -Name "role"
                     )
+
 
                 if ($role -eq "assistant") {
 
@@ -1591,9 +2002,10 @@ function Apply-Event {
 
                     $status["lastActivity"] =
                         "Assistant responding"
-
                 }
-                elseif ($role -eq "user") {
+
+
+                if ($role -eq "user") {
 
                     $status["state"] =
                         "Running"
@@ -1602,21 +2014,36 @@ function Apply-Event {
                         "User input received"
                 }
 
+
                 break
             }
         }
+
+
+        return
     }
 }
 
 
 # ============================================================
-# Locate rollout
+# Startup
 # ============================================================
 
-if (-not (Test-Path $sessionRoot)) {
+Write-Log "============================================================"
+Write-Log "Watch-CodexSession started"
+Write-Log "SessionId=$SessionId"
+Write-Log "CODEX_HOME=$CodexHome"
+Write-Log "MonitorHome=$MonitorHome"
+
+
+if (
+    -not (
+        Test-Path $sessionRoot
+    )
+) {
 
     Write-Log (
-        "Session directory does not exist: " +
+        "Session root does not exist: " +
         $sessionRoot
     )
 
@@ -1632,16 +2059,74 @@ $rolloutPath =
 if (-not $rolloutPath) {
 
     Write-Log (
-        "Unable to find rollout for Session " +
+        "Unable to locate rollout for Session " +
         $SessionId
     )
 
-    exit 1
+    exit 2
 }
 
 
 $status["rolloutPath"] =
     $rolloutPath
+
+
+Write-Log (
+    "Rollout=" +
+    $rolloutPath
+)
+
+
+# ============================================================
+# Prime metadata
+# ============================================================
+
+try {
+
+    $primeLines =
+        Get-Content `
+            -Path $rolloutPath `
+            -TotalCount 200 `
+            -Encoding UTF8 `
+            -ErrorAction Stop
+
+
+    foreach ($line in $primeLines) {
+
+        if (
+            [string]::IsNullOrWhiteSpace(
+                $line
+            )
+        ) {
+            continue
+        }
+
+
+        try {
+
+            $event =
+                $line |
+                ConvertFrom-Json
+
+        }
+        catch {
+
+            continue
+        }
+
+
+        Apply-Event `
+            -Event $event
+    }
+
+}
+catch {
+
+    Write-Log (
+        "Initial metadata prime failed: " +
+        $_.Exception.Message
+    )
+}
 
 
 Refresh-ThreadName -Force
@@ -1650,18 +2135,20 @@ Write-Status
 
 
 Write-Log (
-    "Observer started. " +
-    "Session=$SessionId " +
-    "Rollout=$rolloutPath"
+    "Initial status created: " +
+    $statusPath
 )
 
 
 # ============================================================
-# Follow rollout JSONL read-only
+# Follow rollout
 # ============================================================
 
-$stream = $null
-$reader = $null
+$stream =
+    $null
+
+$reader =
+    $null
 
 
 try {
@@ -1672,27 +2159,111 @@ try {
 
 
     $stream =
-        New-Object `
-            System.IO.FileStream(
-                $rolloutPath,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                $shareMode
-            )
+        [System.IO.FileStream]::new(
+            $rolloutPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            $shareMode
+        )
 
 
     $reader =
-        New-Object `
-            System.IO.StreamReader(
-                $stream,
-                [System.Text.Encoding]::UTF8,
-                $true
+        [System.IO.StreamReader]::new(
+            $stream,
+            [System.Text.Encoding]::UTF8,
+            $true
+        )
+
+
+    # ========================================================
+    # Initial full catch-up
+    # ========================================================
+
+    Write-Log (
+        "Starting initial rollout catch-up."
+    )
+
+
+    $eventCount =
+        0
+
+    $lastProgressWrite =
+        Get-Date
+
+
+    while (
+        $null -ne (
+            $line =
+                $reader.ReadLine()
+        )
+    ) {
+
+        if (
+            [string]::IsNullOrWhiteSpace(
+                $line
             )
+        ) {
+            continue
+        }
 
 
-    $initialCatchup =
-        $true
+        try {
 
+            $event =
+                $line |
+                ConvertFrom-Json
+
+        }
+        catch {
+
+            continue
+        }
+
+
+        Apply-Event `
+            -Event $event
+
+
+        $eventCount++
+
+
+        $elapsed =
+            (
+                (Get-Date) -
+                $lastProgressWrite
+            ).TotalSeconds
+
+
+        if (
+            $eventCount % 500 -eq 0 -or
+            $elapsed -ge 2
+        ) {
+
+            Refresh-ThreadName
+
+            Write-Status
+
+
+            $lastProgressWrite =
+                Get-Date
+        }
+    }
+
+
+    Refresh-ThreadName -Force
+
+    Write-Status
+
+
+    Write-Log (
+        "Initial catch-up complete. " +
+        "Events=$eventCount"
+    )
+
+
+    # ========================================================
+    # Live follow
+    # ========================================================
 
     $nextHeartbeat =
         (Get-Date).AddSeconds(
@@ -1701,6 +2272,10 @@ try {
 
 
     while ($true) {
+
+        $processedAny =
+            $false
+
 
         while (
             $null -ne (
@@ -1735,25 +2310,16 @@ try {
                 -Event $event
 
 
-            # During initial catch-up, do not rewrite status
-            # thousands of times for a large resumed Session.
-            if (-not $initialCatchup) {
-
-                Refresh-ThreadName
-
-                Write-Status
-            }
+            $processedAny =
+                $true
         }
 
 
-        if ($initialCatchup) {
+        if ($processedAny) {
 
-            Refresh-ThreadName -Force
+            Refresh-ThreadName
 
             Write-Status
-
-            $initialCatchup =
-                $false
         }
 
 
@@ -1793,6 +2359,7 @@ finally {
         $reader.Dispose()
     }
 
+
     if ($stream) {
         $stream.Dispose()
     }
@@ -1806,6 +2373,7 @@ finally {
         $status["observerUpdatedAt"] =
             (Get-Date).ToString("o")
 
+
         Write-JsonAtomic `
             -Path $statusPath `
             -Value $status
@@ -1815,5 +2383,7 @@ finally {
     }
 
 
-    Write-Log "Observer stopped."
+    Write-Log (
+        "Watch-CodexSession stopped."
+    )
 }

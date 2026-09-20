@@ -1,73 +1,19 @@
-import { readFile, readdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join, win32 } from 'node:path';
+import {
+  formatHandoffState,
+  getHandoffState,
+  readMonitorStatuses,
+  type LocalStatus,
+} from './local-session-state.js';
 
-const MONITOR_HOME = join(
-  homedir(),
-  '.codex-monitor',
-);
+const ACTIVE_HEARTBEAT_MS =
+  45_000;
 
-const ACTIVE_HEARTBEAT_SECONDS = 30;
-const RECENT_EXITED_LIMIT = 5;
-const HISTORY_LIMIT = 20;
+const DEFAULT_HISTORY_LIMIT =
+  10;
 
-interface TokenUsage {
-  total?: number | null;
-  input?: number | null;
-  cachedInput?: number | null;
-  output?: number | null;
-  reasoningOutput?: number | null;
-}
-
-interface ContextWindow {
-  used?: number | null;
-  total?: number | null;
-  percentLeft?: number | null;
-}
-
-interface LocalStatus {
-  version?: number;
-
-  sessionId?: string;
-  threadName?: string;
-  threadNameUpdatedAt?: string;
-
-  projectName?: string;
-  cwd?: string;
-  rolloutPath?: string;
-
-  cliVersion?: string;
-
-  model?: string;
-  reasoningEffort?: string;
-  modelProvider?: string;
-
-  permissions?: string;
-  approvalPolicy?: string;
-  collaborationMode?: string;
-  personality?: string;
-
-  tokenUsage?: TokenUsage;
-  contextWindow?: ContextWindow;
-
-  state?: string;
-  lastActivity?: string;
-  lastEventType?: string;
-  lastEventTime?: string;
-
-  observerPid?: number;
-  observerState?: string;
-  observerStartedAt?: string;
-  observerUpdatedAt?: string;
-}
-
-interface StatusEntry {
-  fileName: string;
-  status: LocalStatus;
-  updatedAt: number;
-}
-
-function clean(value: unknown): string {
+function clean(
+  value: unknown,
+): string {
   if (
     value === undefined ||
     value === null
@@ -76,729 +22,1109 @@ function clean(value: unknown): string {
   }
 
   return String(value)
-    .replace(/`/g, "'");
+    .replace(
+      /`/g,
+      "'",
+    );
 }
 
-function parseTime(
-  value?: string,
+function toTime(
+  value: unknown,
 ): number {
-  if (!value) {
+  if (
+    typeof value !== 'string' ||
+    !value
+  ) {
     return 0;
   }
 
-  const time =
-    new Date(value).getTime();
+  const parsed =
+    Date.parse(value);
 
-  return Number.isNaN(time)
-    ? 0
-    : time;
+  return Number.isFinite(parsed)
+    ? parsed
+    : 0;
 }
 
-function formatTime(
-  value?: string,
-): string {
-  const time =
-    parseTime(value);
-
-  if (!time) {
-    return '—';
-  }
-
-  return new Date(
-    time,
-  ).toLocaleString();
-}
-
-function ageSeconds(
-  value?: string,
-): number | null {
-  const time =
-    parseTime(value);
-
-  if (!time) {
-    return null;
-  }
-
+function statusTimestamp(
+  status: LocalStatus,
+): number {
   return Math.max(
-    0,
-    Math.floor(
-      (Date.now() - time) / 1000,
+    toTime(
+      status.observerUpdatedAt,
+    ),
+    toTime(
+      status.lastEventTime,
+    ),
+    toTime(
+      status.threadNameUpdatedAt,
     ),
   );
 }
 
-function formatAge(
-  value?: string,
-): string {
-  const seconds =
-    ageSeconds(value);
+function heartbeatAgeMs(
+  status: LocalStatus,
+): number | undefined {
+  const time =
+    toTime(
+      status.observerUpdatedAt,
+    );
 
-  if (seconds === null) {
-    return 'unknown';
+  if (!time) {
+    return undefined;
   }
 
+  return Math.max(
+    0,
+    Date.now() -
+      time,
+  );
+}
+
+function formatDuration(
+  milliseconds: number,
+): string {
+  const seconds =
+    Math.max(
+      0,
+      Math.floor(
+        milliseconds /
+        1000,
+      ),
+    );
+
   if (seconds < 60) {
-    return `${seconds}s ago`;
+    return `${seconds}s`;
   }
 
   const minutes =
     Math.floor(
-      seconds / 60,
+      seconds /
+      60,
     );
 
   if (minutes < 60) {
-    return `${minutes}m ago`;
+    return `${minutes}m`;
   }
 
   const hours =
     Math.floor(
-      minutes / 60,
+      minutes /
+      60,
     );
 
   if (hours < 24) {
-    return `${hours}h ago`;
+    return `${hours}h`;
   }
 
   const days =
     Math.floor(
-      hours / 24,
+      hours /
+      24,
     );
 
-  return `${days}d ago`;
+  return `${days}d`;
 }
 
-function stateIcon(
-  state?: string,
+function formatHeartbeat(
+  status: LocalStatus,
 ): string {
-  switch (
-    (state ?? '')
-      .toLowerCase()
+  if (
+    !status.observerUpdatedAt
   ) {
-    case 'running':
-      return '🔵';
-
-    case 'waiting':
-      return '🟢';
-
-    case 'starting':
-      return '🟡';
-
-    case 'exited':
-      return '⚫';
-
-    default:
-      return '⚪';
+    return 'unknown';
   }
+
+  const age =
+    heartbeatAgeMs(
+      status,
+    );
+
+  if (
+    age === undefined
+  ) {
+    return 'unknown';
+  }
+
+  return `${formatDuration(
+    age,
+  )} ago`;
 }
 
-function stateRank(
-  state?: string,
-): number {
-  switch (
-    (state ?? '')
-      .toLowerCase()
+function formatNumber(
+  value: number,
+): string {
+  if (
+    value >= 1_000_000
   ) {
-    case 'running':
-      return 0;
-
-    case 'waiting':
-      return 1;
-
-    case 'starting':
-      return 2;
-
-    case 'exited':
-      return 9;
-
-    default:
-      return 5;
+    return `${(
+      value /
+      1_000_000
+    ).toFixed(1)}M`;
   }
+
+  if (
+    value >= 1_000
+  ) {
+    return `${(
+      value /
+      1_000
+    ).toFixed(1)}K`;
+  }
+
+  return String(
+    value,
+  );
 }
 
 function observerIsFresh(
   status: LocalStatus,
 ): boolean {
   if (
-    (status.observerState ?? '')
-      .toLowerCase() !==
-    'running'
+    status.observerState !==
+    'Running'
   ) {
     return false;
   }
 
   const age =
-    ageSeconds(
-      status.observerUpdatedAt,
+    heartbeatAgeMs(
+      status,
     );
 
-  return (
-    age !== null &&
-    age <= ACTIVE_HEARTBEAT_SECONDS
-  );
-}
-
-function isActive(
-  status: LocalStatus,
-): boolean {
   if (
-    (status.state ?? '')
-      .toLowerCase() ===
-    'exited'
+    age === undefined
   ) {
     return false;
   }
 
-  return observerIsFresh(
-    status,
+  return (
+    age <=
+    ACTIVE_HEARTBEAT_MS
   );
 }
 
-function observerText(
+function isActiveStatus(
+  status: LocalStatus,
+): boolean {
+  /*
+   * Primary signal:
+   *
+   * a live/fresh Observer means that the Windows
+   * codex3 lifecycle is currently active.
+   */
+  if (
+    observerIsFresh(
+      status,
+    )
+  ) {
+    return true;
+  }
+
+  /*
+   * Older status schemas may not contain the
+   * complete Observer metadata.
+   *
+   * Do not treat explicitly exited sessions
+   * as active.
+   */
+  const observerState =
+    String(
+      status.observerState ??
+      '',
+    ).toLowerCase();
+
+  const state =
+    String(
+      status.state ??
+      '',
+    ).toLowerCase();
+
+  if (
+    observerState ===
+      'stopped' ||
+    observerState ===
+      'exited' ||
+    state ===
+      'exited' ||
+    state ===
+      'stopped'
+  ) {
+    return false;
+  }
+
+  return false;
+}
+
+function stateIcon(
   status: LocalStatus,
 ): string {
   const state =
-    status.observerState ??
-    'Unknown';
+    String(
+      status.state ??
+      '',
+    ).toLowerCase();
 
-  if (
-    state.toLowerCase() ===
-    'running'
-  ) {
-    const age =
-      ageSeconds(
-        status.observerUpdatedAt,
-      );
+  switch (state) {
+    case 'waiting':
+      return '🟢';
 
-    if (
-      age !== null &&
-      age >
-        ACTIVE_HEARTBEAT_SECONDS
-    ) {
-      return (
-        '🟠 Stale · heartbeat ' +
-        formatAge(
-          status.observerUpdatedAt,
-        )
-      );
-    }
+    case 'working':
+    case 'running':
+    case 'active':
+      return '🔵';
 
-    return (
-      '🟢 Running · heartbeat ' +
-      formatAge(
-        status.observerUpdatedAt,
-      )
-    );
+    case 'error':
+    case 'failed':
+      return '🔴';
+
+    case 'exited':
+    case 'stopped':
+      return '⚪';
+
+    default:
+      return '⚪';
   }
-
-  if (
-    state.toLowerCase() ===
-    'stopped'
-  ) {
-    return '⚫ Stopped';
-  }
-
-  return clean(state);
 }
 
-function projectName(
+function displayState(
   status: LocalStatus,
 ): string {
-  if (status.projectName) {
-    return status.projectName;
-  }
-
-  if (status.cwd) {
-    return win32.basename(
-      status.cwd,
-    );
-  }
-
-  return 'Unknown Project';
-}
-
-function shortSessionId(
-  sessionId?: string,
-): string {
-  if (!sessionId) {
-    return 'unknown';
-  }
-
-  if (sessionId.length <= 13) {
-    return sessionId;
-  }
-
-  return (
-    sessionId.slice(0, 13) +
-    '…'
-  );
-}
-
-function formatCompactNumber(
-  value?: number | null,
-): string {
   if (
-    value === undefined ||
-    value === null ||
-    !Number.isFinite(value)
+    status.state
   ) {
-    return '—';
+    return status.state;
   }
 
-  const absolute =
-    Math.abs(value);
-
-  if (absolute >= 1000000) {
-    return (
-      `${Number(
-        (value / 1000000)
-          .toFixed(2),
-      )}M`
-    );
+  if (
+    observerIsFresh(
+      status,
+    )
+  ) {
+    return 'Active';
   }
 
-  if (absolute >= 1000) {
-    return (
-      `${Number(
-        (value / 1000)
-          .toFixed(1),
-      )}K`
-    );
-  }
-
-  return String(
-    Math.round(value),
-  );
+  return 'Unknown';
 }
 
-function modelSummary(
+function formatModel(
   status: LocalStatus,
-): string | null {
+): string | undefined {
   const parts: string[] = [];
 
-  if (status.model) {
+  if (
+    status.model
+  ) {
     parts.push(
-      clean(status.model),
+      status.model,
     );
   }
 
-  if (status.reasoningEffort) {
+  if (
+    status.reasoningEffort
+  ) {
     parts.push(
-      clean(
-        status.reasoningEffort,
-      ),
+      status.reasoningEffort,
     );
   }
 
-  if (status.modelProvider) {
+  if (
+    status.modelProvider
+  ) {
     parts.push(
-      clean(
-        status.modelProvider,
-      ),
+      status.modelProvider,
     );
   }
 
-  if (parts.length === 0) {
-    return null;
+  if (
+    parts.length === 0
+  ) {
+    return undefined;
   }
 
-  return parts.join(' · ');
+  return parts.join(
+    ' · ',
+  );
 }
 
-function contextSummary(
+function formatContext(
   status: LocalStatus,
-): string | null {
+): string | undefined {
   const context =
     status.contextWindow;
 
   if (!context) {
-    return null;
+    return undefined;
   }
+
+  const used =
+    typeof context.used ===
+      'number'
+      ? context.used
+      : undefined;
+
+  const total =
+    typeof context.total ===
+      'number'
+      ? context.total
+      : undefined;
+
+  const percentLeft =
+    typeof context.percentLeft ===
+      'number'
+      ? context.percentLeft
+      : undefined;
 
   const parts: string[] = [];
 
   if (
-    context.percentLeft !==
-      undefined &&
-    context.percentLeft !== null
+    percentLeft !== undefined
   ) {
     parts.push(
-      `${Math.round(
-        context.percentLeft,
-      )}% left`,
+      `${percentLeft}% left`,
     );
   }
 
   if (
-    context.used !== undefined &&
-    context.used !== null &&
-    context.total !== undefined &&
-    context.total !== null
+    used !== undefined &&
+    total !== undefined
   ) {
     parts.push(
-      `${formatCompactNumber(
-        context.used,
-      )} / ${formatCompactNumber(
-        context.total,
+      `${formatNumber(
+        used,
+      )} / ${formatNumber(
+        total,
       )}`,
     );
   }
-
-  if (parts.length === 0) {
-    return null;
+  else if (
+    used !== undefined
+  ) {
+    parts.push(
+      `${formatNumber(
+        used,
+      )} used`,
+    );
   }
 
-  return parts.join(' · ');
+  if (
+    parts.length === 0
+  ) {
+    return undefined;
+  }
+
+  return parts.join(
+    ' · ',
+  );
 }
 
-function tokenSummary(
+function formatTokenUsage(
   status: LocalStatus,
-): string | null {
+): string | undefined {
   const usage =
     status.tokenUsage;
 
   if (!usage) {
-    return null;
+    return undefined;
   }
 
   const parts: string[] = [];
 
   if (
-    usage.total !== undefined &&
-    usage.total !== null
+    typeof usage.total ===
+      'number'
   ) {
     parts.push(
-      `${formatCompactNumber(
+      `Total ${formatNumber(
         usage.total,
-      )} total`,
-    );
-  }
-
-  const io: string[] = [];
-
-  if (
-    usage.input !== undefined &&
-    usage.input !== null
-  ) {
-    io.push(
-      `${formatCompactNumber(
-        usage.input,
-      )} input`,
+      )}`,
     );
   }
 
   if (
-    usage.output !== undefined &&
-    usage.output !== null
+    typeof usage.input ===
+      'number'
   ) {
-    io.push(
-      `${formatCompactNumber(
-        usage.output,
-      )} output`,
-    );
-  }
-
-  if (io.length > 0) {
     parts.push(
-      io.join(' + '),
+      `In ${formatNumber(
+        usage.input,
+      )}`,
     );
   }
 
-  if (parts.length === 0) {
-    return null;
+  if (
+    typeof usage.output ===
+      'number'
+  ) {
+    parts.push(
+      `Out ${formatNumber(
+        usage.output,
+      )}`,
+    );
   }
 
-  return parts.join(' · ');
+  if (
+    parts.length === 0
+  ) {
+    return undefined;
+  }
+
+  return parts.join(
+    ' · ',
+  );
 }
 
-async function readStatuses():
-Promise<StatusEntry[]> {
-  let files;
+function shortSessionId(
+  sessionId: string,
+): string {
+  if (
+    sessionId.length <=
+    16
+  ) {
+    return sessionId;
+  }
 
-  try {
-    files = await readdir(
-      MONITOR_HOME,
-      {
-        withFileTypes: true,
-      },
+  return `${sessionId.slice(
+    0,
+    12,
+  )}…`;
+}
+
+function formatObserver(
+  status: LocalStatus,
+): string {
+  const observerState =
+    status.observerState ??
+    'Unknown';
+
+  const heartbeat =
+    formatHeartbeat(
+      status,
     );
-  }
-  catch {
-    return [];
-  }
 
-  const entries:
-    StatusEntry[] = [];
-
-  for (const file of files) {
-    if (!file.isFile()) {
-      continue;
-    }
-
-    if (
-      !file.name.startsWith(
-        'status-',
-      ) ||
-      !file.name.endsWith(
-        '.json',
-      )
-    ) {
-      continue;
-    }
-
-    const path =
-      join(
-        MONITOR_HOME,
-        file.name,
-      );
-
-    try {
-      let raw =
-        await readFile(
-          path,
-          'utf8',
-        );
-
-      raw = raw
-        .replace(/^\uFEFF/, '')
-        .trim();
-
-      if (!raw) {
-        continue;
-      }
-
-      const status =
-        JSON.parse(
-          raw,
-        ) as LocalStatus;
-
-      if (!status.sessionId) {
-        continue;
-      }
-
-      const updatedAt =
-        Math.max(
-          parseTime(
-            status.observerUpdatedAt,
-          ),
-          parseTime(
-            status.lastEventTime,
-          ),
-          parseTime(
-            status.threadNameUpdatedAt,
-          ),
-        );
-
-      entries.push({
-        fileName: file.name,
-        status,
-        updatedAt,
-      });
-    }
-    catch {
-      // Ignore broken or partially
-      // written historical files.
-    }
+  if (
+    status.observerPid
+  ) {
+    return `${observerState} · PID ${status.observerPid} · heartbeat ${heartbeat}`;
   }
 
-  entries.sort(
-    (a, b) => {
-      const aActive =
-        isActive(a.status);
+  return `${observerState} · heartbeat ${heartbeat}`;
+}
 
-      const bActive =
-        isActive(b.status);
+function formatStatusCard(
+  status: LocalStatus,
+  index?: number,
+): string {
+  const lines: string[] = [];
 
-      if (aActive !== bActive) {
-        return aActive
-          ? -1
-          : 1;
-      }
+  const state =
+    displayState(
+      status,
+    );
 
-      const rankDifference =
-        stateRank(
-          a.status.state,
-        ) -
-        stateRank(
-          b.status.state,
-        );
+  const prefix =
+    index !== undefined
+      ? `${index}. `
+      : '';
 
-      if (
-        rankDifference !== 0
-      ) {
-        return rankDifference;
-      }
-
-      return (
-        b.updatedAt -
-        a.updatedAt
-      );
-    },
+  lines.push(
+    `${prefix}${stateIcon(
+      status,
+    )} **${clean(
+      state,
+    )}**`,
   );
 
-  return entries;
-}
-
-function formatSummary(
-  entries: StatusEntry[],
-  title:
-    | 'active'
-    | 'all'
-    | 'history',
-): string {
-  let heading =
-    '🖥 **Windows Codex Sessions**';
-
-  if (title === 'history') {
-    heading =
-      '🕘 **Windows Codex Session History**';
-  }
-
-  if (entries.length === 0) {
-    if (title === 'active') {
-      return [
-        heading,
-        '',
-        '当前没有发现活跃的 Windows Codex Session。',
-        '',
-        '使用 `/local-status all` 查看最近的历史 Session。',
-      ].join('\n');
-    }
-
-    return [
-      heading,
-      '',
-      '没有找到对应的 Session。',
-    ].join('\n');
-  }
-
-  const lines: string[] = [
-    heading,
-    '',
-  ];
-
-  if (title === 'active') {
+  if (
+    status.threadName
+  ) {
     lines.push(
-      `当前有 **${entries.length}** 个活跃 Session：`,
-      '',
-    );
-  }
-  else {
-    lines.push(
-      `显示 **${entries.length}** 个 Session：`,
-      '',
+      `   🏷 ${clean(
+        status.threadName,
+      )}`,
     );
   }
 
-  entries.forEach(
-    (entry, index) => {
-      const status =
-        entry.status;
+  if (
+    status.projectName
+  ) {
+    lines.push(
+      `   📁 ${clean(
+        status.projectName,
+      )}`,
+    );
+  }
+  else if (
+    status.cwd
+  ) {
+    lines.push(
+      `   📂 ${clean(
+        status.cwd,
+      )}`,
+    );
+  }
 
-      const state =
-        status.state ??
-        'Unknown';
+  const model =
+    formatModel(
+      status,
+    );
 
-      const thread =
-        status.threadName;
+  if (model) {
+    lines.push(
+      `   🤖 ${clean(
+        model,
+      )}`,
+    );
+  }
 
-      lines.push(
-        `${index + 1}. ` +
-        `${stateIcon(state)} ` +
-        `**${clean(state)}**`,
-      );
+  const context =
+    formatContext(
+      status,
+    );
 
-      if (thread) {
-        lines.push(
-          `   🏷 **${clean(
-            thread,
-          )}**`,
-        );
-      }
+  if (context) {
+    lines.push(
+      `   🧠 Context: ${clean(
+        context,
+      )}`,
+    );
+  }
 
-      lines.push(
-        `   📁 ${clean(
-          projectName(status),
-        )}`,
-      );
-
-      const model =
-        modelSummary(status);
-
-      if (model) {
-        lines.push(
-          `   🤖 ${model}`,
-        );
-      }
-
-      const context =
-        contextSummary(status);
-
-      if (context) {
-        lines.push(
-          `   🧠 Context: ${context}`,
-        );
-      }
-
-      lines.push(
-        `   🔗 \`${clean(
-          shortSessionId(
-            status.sessionId,
-          ),
-        )}\``,
-      );
-
-      lines.push(
-        `   👁 ${observerText(
-          status,
-        )}`,
-      );
-
-      if (
-        status.lastActivity
-      ) {
-        lines.push(
-          `   ⚙️ ${clean(
-            status.lastActivity,
-          )}`,
-        );
-      }
-
-      lines.push('');
-    },
+  lines.push(
+    `   🔗 \`${clean(
+      shortSessionId(
+        status.sessionId,
+      ),
+    )}\``,
   );
 
   lines.push(
-    '查看详细状态：',
-    '',
-    '`/local-status <Thread名称或Session-ID前缀>`',
+    `   👁 Observer: ${clean(
+      formatObserver(
+        status,
+      ),
+    )}`,
   );
 
-  if (title === 'active') {
+  /*
+   * This is the new ownership/readiness line.
+   *
+   * Ready requires:
+   *
+   * - Windows writer alive
+   * - Observer alive
+   * - fresh Observer heartbeat
+   * - Session state = Waiting
+   * - launch mapping exists
+   * - Release Agent alive
+   */
+  lines.push(
+    `   🔄 Handoff: ${clean(
+      formatHandoffState(
+        getHandoffState(
+          status,
+        ),
+      ),
+    )}`,
+  );
+
+  if (
+    status.lastActivity
+  ) {
     lines.push(
-      '',
-      '查看最近历史： `/local-status all`',
+      `   ⚙ ${clean(
+        status.lastActivity,
+      )}`,
     );
   }
 
-  return lines.join('\n');
+  return lines.join(
+    '\n',
+  );
 }
 
-function formatDetail(
+function selectorMatches(
   status: LocalStatus,
+  selector: string,
+): boolean {
+  const input =
+    selector
+      .trim()
+      .toLowerCase();
+
+  if (!input) {
+    return false;
+  }
+
+  if (
+    status.sessionId
+      .toLowerCase()
+      .startsWith(
+        input,
+      )
+  ) {
+    return true;
+  }
+
+  if (
+    status.threadName
+      ?.toLowerCase()
+      .startsWith(
+        input,
+      )
+  ) {
+    return true;
+  }
+
+  if (
+    status.projectName
+      ?.toLowerCase() ===
+      input
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function resolveSelector(
+  statuses: LocalStatus[],
+  selector: string,
+):
+  | {
+      ok: true;
+      status: LocalStatus;
+    }
+  | {
+      ok: false;
+      message: string;
+    } {
+  const input =
+    selector.trim();
+
+  const lower =
+    input.toLowerCase();
+
+  /*
+   * Priority:
+   *
+   * 1. exact full Session ID
+   * 2. unique Session ID prefix
+   * 3. exact Thread name
+   * 4. unique Thread-name prefix
+   * 5. exact Project name
+   */
+
+  const exactId =
+    statuses.filter(
+      (status) =>
+        status.sessionId
+          .toLowerCase() ===
+        lower,
+    );
+
+  if (
+    exactId.length === 1
+  ) {
+    return {
+      ok: true,
+      status: exactId[0]!,
+    };
+  }
+
+  const idPrefix =
+    statuses.filter(
+      (status) =>
+        status.sessionId
+          .toLowerCase()
+          .startsWith(
+            lower,
+          ),
+    );
+
+  if (
+    idPrefix.length === 1
+  ) {
+    return {
+      ok: true,
+      status: idPrefix[0]!,
+    };
+  }
+
+  if (
+    idPrefix.length > 1
+  ) {
+    return {
+      ok: false,
+
+      message: [
+        '⚠️ **Session ID 前缀匹配到多个 Session。**',
+        '',
+        ...idPrefix
+          .slice(
+            0,
+            10,
+          )
+          .map(
+            (status) =>
+              `- \`${clean(
+                status.sessionId,
+              )}\`${
+                status.threadName
+                  ? ` — ${clean(
+                      status.threadName,
+                    )}`
+                  : ''
+              }`,
+          ),
+      ].join('\n'),
+    };
+  }
+
+  const exactThread =
+    statuses.filter(
+      (status) =>
+        status.threadName
+          ?.toLowerCase() ===
+        lower,
+    );
+
+  if (
+    exactThread.length === 1
+  ) {
+    return {
+      ok: true,
+      status: exactThread[0]!,
+    };
+  }
+
+  if (
+    exactThread.length > 1
+  ) {
+    return {
+      ok: false,
+
+      message: [
+        '⚠️ **Thread 名称匹配到多个 Session。**',
+        '',
+        ...exactThread
+          .slice(
+            0,
+            10,
+          )
+          .map(
+            (status) =>
+              `- \`${clean(
+                status.sessionId,
+              )}\``,
+          ),
+      ].join('\n'),
+    };
+  }
+
+  const threadPrefix =
+    statuses.filter(
+      (status) =>
+        status.threadName
+          ?.toLowerCase()
+          .startsWith(
+            lower,
+          ),
+    );
+
+  if (
+    threadPrefix.length === 1
+  ) {
+    return {
+      ok: true,
+      status:
+        threadPrefix[0]!,
+    };
+  }
+
+  if (
+    threadPrefix.length > 1
+  ) {
+    return {
+      ok: false,
+
+      message: [
+        '⚠️ **Thread 名称前缀匹配到多个 Session。**',
+        '',
+        ...threadPrefix
+          .slice(
+            0,
+            10,
+          )
+          .map(
+            (status) =>
+              `- ${clean(
+                status.threadName,
+              )} · \`${clean(
+                status.sessionId,
+              )}\``,
+          ),
+      ].join('\n'),
+    };
+  }
+
+  const projectMatches =
+    statuses.filter(
+      (status) =>
+        status.projectName
+          ?.toLowerCase() ===
+        lower,
+    );
+
+  if (
+    projectMatches.length ===
+    1
+  ) {
+    return {
+      ok: true,
+      status:
+        projectMatches[0]!,
+    };
+  }
+
+  if (
+    projectMatches.length >
+    1
+  ) {
+    return {
+      ok: false,
+
+      message: [
+        `⚠️ **Project \`${clean(
+          input,
+        )}\` 中存在多个 Session。**`,
+        '',
+        '请使用 Thread 名称或 Session ID：',
+        '',
+        ...projectMatches
+          .slice(
+            0,
+            10,
+          )
+          .map(
+            (status) =>
+              `- ${
+                status.threadName
+                  ? `${clean(
+                      status.threadName,
+                    )} · `
+                  : ''
+              }\`${clean(
+                status.sessionId,
+              )}\``,
+          ),
+      ].join('\n'),
+    };
+  }
+
+  return {
+    ok: false,
+
+    message:
+      `❌ 没有找到 Session：\`${clean(
+        input,
+      )}\``,
+  };
+}
+
+function sortNewestFirst(
+  statuses: LocalStatus[],
+): LocalStatus[] {
+  return [
+    ...statuses,
+  ].sort(
+    (
+      a,
+      b,
+    ) =>
+      statusTimestamp(b) -
+      statusTimestamp(a),
+  );
+}
+
+function renderList(
+  title: string,
+  statuses: LocalStatus[],
 ): string {
-  const state =
-    status.state ??
-    'Unknown';
+  const lines: string[] = [
+    `## ${title}`,
+    '',
+  ];
+
+  let index = 0;
+
+  for (
+    const status of statuses
+  ) {
+    index += 1;
+
+    lines.push(
+      formatStatusCard(
+        status,
+        index,
+      ),
+      '',
+    );
+  }
+
+  return lines
+    .join('\n')
+    .trim();
+}
+
+function usageText(): string {
+  return [
+    '## Windows Codex Sessions',
+    '',
+    '没有找到匹配的 Session。',
+    '',
+    '用法：',
+    '',
+    '- `/local-status` — 当前 Windows 活跃 Session',
+    '- `/local-status all` — 活跃 + 历史 Session',
+    '- `/local-status history` — 历史 Session',
+    '- `/local-status <Thread名称>` — 查看指定 Session',
+    '- `/local-status <Session-ID前缀>` — 查看指定 Session',
+    '- `/local-status <Project名称>` — Project 中仅有一个匹配时显示详情',
+  ].join('\n');
+}
+
+export async function handleLocalStatus(
+  args: string,
+): Promise<string> {
+  const input =
+    args.trim();
+
+  const statuses =
+    sortNewestFirst(
+      readMonitorStatuses(),
+    );
+
+  if (
+    statuses.length === 0
+  ) {
+    return [
+      '## Windows Codex Sessions',
+      '',
+      '当前 `.codex-monitor` 中没有 Session 状态记录。',
+    ].join('\n');
+  }
+
+  const active =
+    statuses.filter(
+      isActiveStatus,
+    );
+
+  const history =
+    statuses.filter(
+      (status) =>
+        !isActiveStatus(
+          status,
+        ),
+    );
+
+  /*
+   * Default:
+   *
+   * show active Windows sessions only.
+   */
+  if (!input) {
+    if (
+      active.length === 0
+    ) {
+      return [
+        '## Windows Codex Sessions',
+        '',
+        '当前没有活跃的 Windows Codex Session。',
+        '',
+        `历史记录：${history.length}`,
+        '',
+        '使用 `/local-status history` 或 `/local-status all` 查看历史。',
+      ].join('\n');
+    }
+
+    return renderList(
+      'Windows Codex Sessions',
+      active,
+    );
+  }
+
+  const mode =
+    input.toLowerCase();
+
+  if (
+    mode === 'all'
+  ) {
+    return renderList(
+      'Windows Codex Sessions · All',
+      statuses,
+    );
+  }
+
+  if (
+    mode === 'history'
+  ) {
+    if (
+      history.length === 0
+    ) {
+      return [
+        '## Windows Codex Sessions · History',
+        '',
+        '当前没有历史 Session。',
+      ].join('\n');
+    }
+
+    return renderList(
+      'Windows Codex Sessions · History',
+      history.slice(
+        0,
+        DEFAULT_HISTORY_LIMIT,
+      ),
+    );
+  }
+
+  /*
+   * Detail lookup searches all status records,
+   * including historical sessions.
+   */
+  const resolved =
+    resolveSelector(
+      statuses,
+      input,
+    );
+
+  if (!resolved.ok) {
+    return resolved.message;
+  }
+
+  const status =
+    resolved.status;
+
+  const handoff =
+    getHandoffState(
+      status,
+    );
 
   const lines: string[] = [
-    '🖥 **Windows Codex Session**',
+    '## Windows Codex Session',
     '',
-    `${stateIcon(state)} **State:** ${clean(
-      state,
+    `${stateIcon(
+      status,
+    )} **State:** ${clean(
+      displayState(
+        status,
+      ),
     )}`,
   ];
 
-  if (status.threadName) {
+  if (
+    status.threadName
+  ) {
     lines.push(
       '',
       `🏷 **Thread:** ${clean(
@@ -807,111 +1133,23 @@ function formatDetail(
     );
   }
 
-  lines.push(
-    '',
-    `📁 **Project:** ${clean(
-      projectName(status),
-    )}`,
-  );
-
-  if (status.cwd) {
+  if (
+    status.projectName
+  ) {
     lines.push(
-      `📂 **Directory:** \`${clean(
-        status.cwd,
-      )}\``,
-    );
-  }
-
-  if (status.model) {
-    lines.push(
-      '',
-      `🤖 **Model:** ${clean(
-        status.model,
-      )}`,
-    );
-  }
-
-  if (status.reasoningEffort) {
-    lines.push(
-      `🧠 **Reasoning:** ${clean(
-        status.reasoningEffort,
-      )}`,
-    );
-  }
-
-  if (status.modelProvider) {
-    lines.push(
-      `🔌 **Provider:** ${clean(
-        status.modelProvider,
-      )}`,
-    );
-  }
-
-  if (status.cliVersion) {
-    lines.push(
-      `📦 **Codex:** v${clean(
-        status.cliVersion,
+      `📁 **Project:** ${clean(
+        status.projectName,
       )}`,
     );
   }
 
   if (
-    status.permissions ||
-    status.approvalPolicy ||
-    status.collaborationMode ||
-    status.personality
+    status.cwd
   ) {
-    lines.push('');
-  }
-
-  if (status.permissions) {
     lines.push(
-      `🔐 **Permissions:** ${clean(
-        status.permissions,
-      )}`,
-    );
-  }
-
-  if (status.approvalPolicy) {
-    lines.push(
-      `✅ **Approval:** ${clean(
-        status.approvalPolicy,
-      )}`,
-    );
-  }
-
-  if (status.collaborationMode) {
-    lines.push(
-      `🤝 **Collaboration:** ${clean(
-        status.collaborationMode,
-      )}`,
-    );
-  }
-
-  if (status.personality) {
-    lines.push(
-      `🎛 **Personality:** ${clean(
-        status.personality,
-      )}`,
-    );
-  }
-
-  const tokens =
-    tokenSummary(status);
-
-  if (tokens) {
-    lines.push(
-      '',
-      `📊 **Tokens:** ${tokens}`,
-    );
-  }
-
-  const context =
-    contextSummary(status);
-
-  if (context) {
-    lines.push(
-      `🧠 **Context:** ${context}`,
+      `📂 **Directory:** \`${clean(
+        status.cwd,
+      )}\``,
     );
   }
 
@@ -922,332 +1160,159 @@ function formatDetail(
     )}\``,
   );
 
-  lines.push(
-    '',
-    `👁 **Observer:** ${observerText(
-      status,
-    )}`,
-  );
-
-  if (status.observerPid) {
+  if (
+    status.cliVersion
+  ) {
     lines.push(
-      `🔧 **Observer PID:** \`${status.observerPid}\``,
+      `🛠 **Codex CLI:** ${clean(
+        status.cliVersion,
+      )}`,
     );
   }
 
-  if (status.lastActivity) {
+  const model =
+    formatModel(
+      status,
+    );
+
+  if (model) {
+    lines.push(
+      `🤖 **Model:** ${clean(
+        model,
+      )}`,
+    );
+  }
+
+  if (
+    status.permissions
+  ) {
+    lines.push(
+      `🔐 **Permissions:** ${clean(
+        status.permissions,
+      )}`,
+    );
+  }
+
+  if (
+    status.approvalPolicy
+  ) {
+    lines.push(
+      `✅ **Approval:** ${clean(
+        status.approvalPolicy,
+      )}`,
+    );
+  }
+
+  if (
+    status.collaborationMode
+  ) {
+    lines.push(
+      `👥 **Collaboration:** ${clean(
+        status.collaborationMode,
+      )}`,
+    );
+  }
+
+  if (
+    status.personality
+  ) {
+    lines.push(
+      `🎛 **Personality:** ${clean(
+        status.personality,
+      )}`,
+    );
+  }
+
+  const context =
+    formatContext(
+      status,
+    );
+
+  if (context) {
     lines.push(
       '',
-      `⚙️ **Activity:** ${clean(
+      `🧠 **Context:** ${clean(
+        context,
+      )}`,
+    );
+  }
+
+  const tokenUsage =
+    formatTokenUsage(
+      status,
+    );
+
+  if (tokenUsage) {
+    lines.push(
+      `📊 **Tokens:** ${clean(
+        tokenUsage,
+      )}`,
+    );
+  }
+
+  lines.push(
+    '',
+    `👁 **Observer:** ${clean(
+      formatObserver(
+        status,
+      ),
+    )}`,
+  );
+
+  lines.push(
+    `🔄 **Handoff:** ${clean(
+      formatHandoffState(
+        handoff,
+      ),
+    )}`,
+  );
+
+  if (
+    handoff.launch
+      ?.releaseAgentPid
+  ) {
+    lines.push(
+      `🛰 **Release Agent:** Recorded · PID ${
+        handoff.launch
+          .releaseAgentPid
+      }`,
+    );
+  }
+
+  if (
+    handoff.launch
+      ?.codexRootPid
+  ) {
+    lines.push(
+      `🖥 **Recorded Codex root:** PID ${
+        handoff.launch
+          .codexRootPid
+      }`,
+    );
+  }
+
+  if (
+    status.lastActivity
+  ) {
+    lines.push(
+      '',
+      `⚙ **Activity:** ${clean(
         status.lastActivity,
       )}`,
     );
   }
 
-  if (status.lastEventType) {
+  if (
+    status.lastEventType
+  ) {
     lines.push(
-      `📡 **Last event:** \`${clean(
+      `📨 **Last event:** ${clean(
         status.lastEventType,
-      )}\``,
-    );
-  }
-
-  if (status.lastEventTime) {
-    lines.push(
-      `🕒 **Last Codex event:** ${formatTime(
-        status.lastEventTime,
       )}`,
     );
   }
 
-  if (
-    status.observerUpdatedAt
-  ) {
-    lines.push(
-      `💓 **Observer updated:** ${formatTime(
-        status.observerUpdatedAt,
-      )}`,
-    );
-  }
-
-  if (status.rolloutPath) {
-    lines.push(
-      '',
-      `📄 **Rollout:** \`${clean(
-        status.rolloutPath,
-      )}\``,
-    );
-  }
-
-  return lines.join('\n');
-}
-
-function findMatches(
-  entries: StatusEntry[],
-  query: string,
-): StatusEntry[] {
-  const normalized =
-    query.trim()
-      .toLowerCase();
-
-  if (!normalized) {
-    return [];
-  }
-
-  // Exact match has highest priority.
-  const exact =
-    entries.filter(
-      (entry) => {
-        const status =
-          entry.status;
-
-        return (
-          status.sessionId
-            ?.toLowerCase() ===
-            normalized ||
-          status.threadName
-            ?.toLowerCase() ===
-            normalized ||
-          projectName(status)
-            .toLowerCase() ===
-            normalized
-        );
-      },
-    );
-
-  if (exact.length > 0) {
-    return exact;
-  }
-
-  // Then allow prefixes.
-  return entries.filter(
-    (entry) => {
-      const status =
-        entry.status;
-
-      return (
-        status.sessionId
-          ?.toLowerCase()
-          .startsWith(
-            normalized,
-          ) ||
-        status.threadName
-          ?.toLowerCase()
-          .startsWith(
-            normalized,
-          ) ||
-        projectName(status)
-          .toLowerCase()
-          .startsWith(
-            normalized,
-          )
-      );
-    },
-  );
-}
-
-function formatAmbiguous(
-  query: string,
-  matches: StatusEntry[],
-): string {
-  const lines: string[] = [
-    '⚠️ **匹配到多个 Windows Codex Session。**',
-    '',
-    `查询：\`${clean(
-      query,
-    )}\``,
-    '',
-  ];
-
-  for (const entry of matches) {
-    const status =
-      entry.status;
-
-    lines.push(
-      `- ${stateIcon(
-        status.state,
-      )} ` +
-      `${status.threadName
-        ? `**${clean(
-            status.threadName,
-          )}** · `
-        : ''}` +
-      `${clean(
-        projectName(status),
-      )} · ` +
-      `\`${clean(
-        shortSessionId(
-          status.sessionId,
-        ),
-      )}\``,
-    );
-  }
-
-  lines.push(
-    '',
-    '请使用更完整的 Thread 名称或 Session ID 前缀。',
-  );
-
-  return lines.join('\n');
-}
-
-export async function handleLocalStatus(
-  args: string,
-): Promise<string> {
-  const query =
-    args.trim();
-
-  const entries =
-    await readStatuses();
-
-  // ----------------------------------------------------------
-  // /local-status
-  //
-  // Only active local Sessions.
-  // Historical/stale status files are hidden.
-  // ----------------------------------------------------------
-
-  if (!query) {
-    const active =
-      entries.filter(
-        (entry) =>
-          isActive(
-            entry.status,
-          ),
-      );
-
-    return formatSummary(
-      active,
-      'active',
-    );
-  }
-
-  // ----------------------------------------------------------
-  // /local-status all
-  //
-  // Active Sessions + most recent historical Sessions.
-  // ----------------------------------------------------------
-
-  if (
-    query.toLowerCase() ===
-    'all'
-  ) {
-    const active =
-      entries.filter(
-        (entry) =>
-          isActive(
-            entry.status,
-          ),
-      );
-
-    const historical =
-      entries
-        .filter(
-          (entry) =>
-            !isActive(
-              entry.status,
-            ),
-        )
-        .sort(
-          (a, b) =>
-            b.updatedAt -
-            a.updatedAt,
-        )
-        .slice(
-          0,
-          RECENT_EXITED_LIMIT,
-        );
-
-    return formatSummary(
-      [
-        ...active,
-        ...historical,
-      ],
-      'all',
-    );
-  }
-
-  // ----------------------------------------------------------
-  // /local-status history
-  // ----------------------------------------------------------
-
-  if (
-    query.toLowerCase() ===
-    'history'
-  ) {
-    const historical =
-      entries
-        .filter(
-          (entry) =>
-            !isActive(
-              entry.status,
-            ),
-        )
-        .sort(
-          (a, b) =>
-            b.updatedAt -
-            a.updatedAt,
-        )
-        .slice(
-          0,
-          HISTORY_LIMIT,
-        );
-
-    return formatSummary(
-      historical,
-      'history',
-    );
-  }
-
-  // ----------------------------------------------------------
-  // Search by:
-  //
-  // Session ID
-  // Session ID prefix
-  // exact Thread name
-  // Thread-name prefix
-  // Project name
-  // ----------------------------------------------------------
-
-  const matches =
-    findMatches(
-      entries,
-      query,
-    );
-
-  if (matches.length === 0) {
-    return [
-      '❌ **没有找到对应的 Windows Codex Session。**',
-      '',
-      `查询：\`${clean(
-        query,
-      )}\``,
-      '',
-      '使用 `/local-status` 查看当前活跃 Session。',
-      '',
-      '使用 `/local-status all` 查看最近历史 Session。',
-    ].join('\n');
-  }
-
-  if (matches.length > 1) {
-    return formatAmbiguous(
-      query,
-      matches,
-    );
-  }
-
-  const match =
-    matches[0];
-
-  if (!match) {
-    return [
-      '❌ **没有找到对应的 Windows Codex Session。**',
-      '',
-      '使用 `/local-status` 查看当前活跃 Session。',
-    ].join('\n');
-  }
-
-  return formatDetail(
-    match.status,
+  return lines.join(
+    '\n',
   );
 }

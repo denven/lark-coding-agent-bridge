@@ -9,6 +9,12 @@ import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import { handleLocalStatus } from './local-status';
 import { handleLocalRelease } from './local-release';
+import { handleLocalHandoff } from './local-handoff.js';
+import {
+  handleLocalHandback,
+  handleLocalSessions,
+  handleLocalUse,
+} from './local-session-manager.js';
 
 import {
   accountCurrentCard,
@@ -184,6 +190,18 @@ const handlers: Record<string, Handler> = {
     const markdown = await handleLocalRelease(args);
     await reply(ctx, markdown);
   },
+  '/local-handoff': async (args, ctx) => {
+    await handleLocalHandoff(args, ctx);
+  },
+  '/sessions': async (args, ctx) => {
+    await handleLocalSessions(args, ctx);
+  },
+  '/use': async (args, ctx) => {
+    await handleLocalUse(args, ctx);
+  },
+  '/handback': async (args, ctx) => {
+    await handleLocalHandback(args, ctx);
+  },
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -213,6 +231,10 @@ const ADMIN_COMMANDS = new Set([
   '/doctor',
   '/local-status',
   '/local-release',
+  '/local-handoff',
+  '/sessions',
+  '/use',
+  '/handback',
   '/cd',
   '/ws',
   '/invite',

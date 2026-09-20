@@ -73,6 +73,17 @@ export class SessionStore {
   getRaw(chatId: string): SessionEntry | undefined {
     return this.data[chatId];
   }
+  
+  listRaw(): Record<string, SessionEntry> {
+    return Object.fromEntries(
+      Object.entries(this.data).map(
+        ([scope, entry]) => [
+          scope,
+          { ...entry },
+        ],
+      ),
+    );
+  }
 
   set(chatId: string, sessionId: string, cwd: string): void {
     // Preserve idleTimeoutMinutes across run starts — it's a per-scope
