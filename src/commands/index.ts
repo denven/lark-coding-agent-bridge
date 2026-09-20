@@ -7,6 +7,8 @@ import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
+import { handleLocalStatus } from './local-status';
+
 import {
   accountCurrentCard,
   accountFailureCard,
@@ -173,6 +175,7 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  '/local-status': handleLocalStatus,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -200,6 +203,7 @@ const ADMIN_COMMANDS = new Set([
   '/exit',
   '/reconnect',
   '/doctor',
+  '/local-status',
   '/cd',
   '/ws',
   '/invite',
