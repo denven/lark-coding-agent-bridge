@@ -2,11 +2,13 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SessionId,
 
-    [string]$CodexHome = "$HOME\.codex-cli-thirdparty",
+    [string]$CodexHome =
+        "$HOME\.codex-cli-thirdparty",
 
-    [int]$PollMilliseconds = 500,
+    [string]$MonitorHome =
+        "$HOME\.codex-monitor",
 
-    [int]$HistoryTail = 3000
+    [int]$HeartbeatSeconds = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,593 +18,1591 @@ $ErrorActionPreference = "Stop"
 # Paths
 # ============================================================
 
-$monitorHome = "$HOME\.codex-monitor"
+$sessionRoot =
+    Join-Path $CodexHome "sessions"
+
+$sessionIndexPath =
+    Join-Path $CodexHome "session_index.jsonl"
+
+$logDir =
+    Join-Path $MonitorHome "logs"
+
+$statusPath =
+    Join-Path `
+        $MonitorHome `
+        "status-$SessionId.json"
+
+$logPath =
+    Join-Path `
+        $logDir `
+        "observer-$SessionId.log"
+
 
 New-Item `
-    -Path $monitorHome `
     -ItemType Directory `
-    -Force | Out-Null
+    -Path $MonitorHome `
+    -Force |
+    Out-Null
 
-$statusFile = Join-Path `
-    $monitorHome `
-    "status-$SessionId.json"
-
-
-# ============================================================
-# Find rollout file
-# ============================================================
-
-Write-Host ""
-Write-Host "Searching rollout for session: $SessionId" `
-    -ForegroundColor Cyan
-
-$sessionRoot = Join-Path $CodexHome "sessions"
-
-if (-not (Test-Path $sessionRoot)) {
-    throw "Codex sessions directory does not exist: $sessionRoot"
-}
-
-$rollout = Get-ChildItem `
-    $sessionRoot `
-    -Recurse `
-    -Filter "*$SessionId*.jsonl" `
-    -File `
-    -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-
-if (-not $rollout) {
-    throw @"
-Cannot find rollout JSONL for session:
-
-$SessionId
-
-under:
-
-$sessionRoot
-"@
-}
-
-Write-Host "Rollout: $($rollout.FullName)" `
-    -ForegroundColor DarkGray
+New-Item `
+    -ItemType Directory `
+    -Path $logDir `
+    -Force |
+    Out-Null
 
 
 # ============================================================
-# Runtime state
+# Helpers
 # ============================================================
 
-$state = [ordered]@{
-    version             = 1
+function Write-Log {
 
-    sessionId           = $SessionId
-    cwd                 = $null
-    rolloutPath         = $rollout.FullName
-
-    state               = "Unknown"
-    lastActivity        = "Observer started"
-    lastEventType       = $null
-    lastEventTime       = $null
-
-    observerPid         = $PID
-    observerState       = "Running"
-    observerUpdatedAt   = (Get-Date).ToString("o")
-}
-
-
-# ============================================================
-# Helper: Write status JSON atomically
-# ============================================================
-
-function Write-MonitorStatus {
     param(
-        [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$Data
+        [string]$Message
     )
 
-    $Data.observerUpdatedAt = (Get-Date).ToString("o")
+    try {
 
-    $tmpFile = "$statusFile.tmp"
+        Add-Content `
+            -Path $logPath `
+            -Value (
+                "$(Get-Date -Format o) $Message"
+            ) `
+            -Encoding UTF8
 
-    $json = $Data |
-        ConvertTo-Json -Depth 20
-
-    Set-Content `
-        -Path $tmpFile `
-        -Value $json `
-        -Encoding UTF8
-
-    Move-Item `
-        -Path $tmpFile `
-        -Destination $statusFile `
-        -Force
+    }
+    catch {
+        # Logging must never stop the observer.
+    }
 }
 
 
-# ============================================================
-# Helper: Shorten long text
-# ============================================================
+function Write-JsonAtomic {
 
-function Shorten-Text {
     param(
-        [object]$Text,
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
 
-        [int]$Length = 180
+        [Parameter(Mandatory = $true)]
+        [object]$Value
     )
 
-    if ($null -eq $Text) {
+    $json =
+        $Value |
+        ConvertTo-Json -Depth 30
+
+    $utf8 =
+        New-Object `
+            System.Text.UTF8Encoding($false)
+
+    $tempPath =
+        "$Path.$PID.tmp"
+
+    [System.IO.File]::WriteAllText(
+        $tempPath,
+        $json,
+        $utf8
+    )
+
+    try {
+
+        if (Test-Path $Path) {
+
+            [System.IO.File]::Replace(
+                $tempPath,
+                $Path,
+                $null
+            )
+
+        }
+        else {
+
+            [System.IO.File]::Move(
+                $tempPath,
+                $Path
+            )
+        }
+
+    }
+    catch {
+
+        Move-Item `
+            -Path $tempPath `
+            -Destination $Path `
+            -Force
+    }
+}
+
+
+function Get-PropertyValue {
+
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
         return $null
     }
 
-    $value = [string]$Text
+    $property =
+        $Object.PSObject.Properties[$Name]
 
-    $value = $value `
-        -replace "[`r`n`t]+", " "
-
-    $value = $value.Trim()
-
-    if ($value.Length -gt $Length) {
-        return (
-            $value.Substring(0, $Length) +
-            "..."
-        )
+    if ($null -eq $property) {
+        return $null
     }
 
-    return $value
+    return $property.Value
 }
 
 
-# ============================================================
-# Helper: Console event output
-# ============================================================
+function Get-FirstNumber {
 
-function Write-Activity {
     param(
-        [string]$Category,
-
-        [string]$Message,
-
-        [ConsoleColor]$Color = "Gray"
+        [object[]]$Values
     )
 
-    $time = Get-Date -Format "HH:mm:ss"
+    foreach ($value in $Values) {
 
-    $categoryText = $Category.PadRight(10)
+        if ($null -eq $value) {
+            continue
+        }
 
-    Write-Host `
-        "[$time] $categoryText $Message" `
-        -ForegroundColor $Color
+        try {
+            return [long]$value
+        }
+        catch {
+        }
+    }
+
+    return $null
+}
+
+
+function Get-ProjectName {
+
+    param(
+        [string]$Path
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $Path
+        )
+    ) {
+        return $null
+    }
+
+    try {
+
+        return (
+            Split-Path `
+                $Path.TrimEnd(
+                    "\", "/"
+                ) `
+                -Leaf
+        )
+
+    }
+    catch {
+
+        return $null
+    }
+}
+
+
+function Convert-PermissionProfile {
+
+    param(
+        [object]$PermissionProfile
+    )
+
+    if ($null -eq $PermissionProfile) {
+        return $null
+    }
+
+    $type =
+        [string](
+            Get-PropertyValue `
+                -Object $PermissionProfile `
+                -Name "type"
+        )
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $type
+        )
+    ) {
+        return $null
+    }
+
+    switch (
+        $type.ToLowerInvariant()
+    ) {
+
+        "disabled" {
+            return "Full Access"
+        }
+
+        "read_only" {
+            return "Read Only"
+        }
+
+        "workspace_write" {
+            return "Workspace Write"
+        }
+
+        default {
+            return $type
+        }
+    }
 }
 
 
 # ============================================================
-# Helper: Extract useful tool name/details
+# Rollout discovery
 # ============================================================
 
-function Get-ToolDescription {
+function Find-RolloutPath {
+
+    param(
+        [string]$Id
+    )
+
+    $deadline =
+        (Get-Date).AddSeconds(30)
+
+    while ((Get-Date) -lt $deadline) {
+
+        $match =
+            Get-ChildItem `
+                $sessionRoot `
+                -Recurse `
+                -File `
+                -Filter "rollout-*$Id*.jsonl" `
+                -ErrorAction SilentlyContinue |
+            Sort-Object `
+                LastWriteTimeUtc `
+                -Descending |
+            Select-Object -First 1
+
+        if ($match) {
+            return $match.FullName
+        }
+
+        Start-Sleep `
+            -Milliseconds 300
+    }
+
+    return $null
+}
+
+
+# ============================================================
+# Thread name
+#
+# session_index.jsonl is append-only:
+#
+# {
+#   "id": "...",
+#   "thread_name": "...",
+#   "updated_at": "..."
+# }
+#
+# One Session may appear multiple times after renaming.
+# Always choose the newest updated_at.
+# ============================================================
+
+function Get-LatestThreadInfo {
+
+    if (-not (Test-Path $sessionIndexPath)) {
+        return $null
+    }
+
+    $stream = $null
+    $reader = $null
+
+    try {
+
+        $stream =
+            [System.IO.File]::Open(
+                $sessionIndexPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite
+            )
+
+        $reader =
+            New-Object `
+                System.IO.StreamReader(
+                    $stream,
+                    [System.Text.Encoding]::UTF8,
+                    $true
+                )
+
+        $bestRecord =
+            $null
+
+        $bestTime =
+            [datetimeoffset]::MinValue
+
+        $lineNumber =
+            0
+
+        $bestLineNumber =
+            -1
+
+        while (
+            $null -ne (
+                $line =
+                    $reader.ReadLine()
+            )
+        ) {
+
+            $lineNumber++
+
+            if (
+                [string]::IsNullOrWhiteSpace(
+                    $line
+                )
+            ) {
+                continue
+            }
+
+            try {
+
+                $record =
+                    $line |
+                    ConvertFrom-Json
+
+            }
+            catch {
+                continue
+            }
+
+            if (
+                [string]$record.id -ne
+                $SessionId
+            ) {
+                continue
+            }
+
+            $updated =
+                [datetimeoffset]::MinValue
+
+            try {
+
+                $updated =
+                    [datetimeoffset]::Parse(
+                        [string]$record.updated_at
+                    )
+
+            }
+            catch {
+            }
+
+            if (
+                $updated -gt $bestTime -or
+                (
+                    $updated -eq $bestTime -and
+                    $lineNumber -gt $bestLineNumber
+                )
+            ) {
+
+                $bestRecord =
+                    $record
+
+                $bestTime =
+                    $updated
+
+                $bestLineNumber =
+                    $lineNumber
+            }
+        }
+
+        if (-not $bestRecord) {
+            return $null
+        }
+
+        return (
+            [pscustomobject]@{
+
+                ThreadName =
+                    [string]$bestRecord.thread_name
+
+                UpdatedAt =
+                    if (
+                        $bestTime -ne
+                        [datetimeoffset]::MinValue
+                    ) {
+                        $bestTime.ToString("o")
+                    }
+                    else {
+                        $null
+                    }
+            }
+        )
+
+    }
+    catch {
+
+        Write-Log (
+            "Unable to read session_index.jsonl: " +
+            $_.Exception.Message
+        )
+
+        return $null
+
+    }
+    finally {
+
+        if ($reader) {
+            $reader.Dispose()
+        }
+
+        if ($stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
+
+# ============================================================
+# Token usage helpers
+# ============================================================
+
+function Get-UsageSnapshot {
+
+    param(
+        [object]$Object
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+
+    $total =
+        Get-FirstNumber @(
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "total_tokens"
+            ),
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "total"
+            )
+        )
+
+    $input =
+        Get-FirstNumber @(
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "input_tokens"
+            ),
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "input"
+            )
+        )
+
+    $cachedInput =
+        Get-FirstNumber @(
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "cached_input_tokens"
+            ),
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "cached_input"
+            )
+        )
+
+    $output =
+        Get-FirstNumber @(
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "output_tokens"
+            ),
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "output"
+            )
+        )
+
+    $reasoningOutput =
+        Get-FirstNumber @(
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "reasoning_output_tokens"
+            ),
+            (
+                Get-PropertyValue `
+                    $Object `
+                    "reasoning_tokens"
+            )
+        )
+
+    if (
+        $null -eq $total -and
+        $null -eq $input -and
+        $null -eq $cachedInput -and
+        $null -eq $output -and
+        $null -eq $reasoningOutput
+    ) {
+        return $null
+    }
+
+    return (
+        [pscustomobject]@{
+
+            total =
+                $total
+
+            input =
+                $input
+
+            cachedInput =
+                $cachedInput
+
+            output =
+                $output
+
+            reasoningOutput =
+                $reasoningOutput
+        }
+    )
+}
+
+
+function Apply-UsageSnapshot {
+
+    param(
+        [object]$Snapshot,
+        [object]$Status
+    )
+
+    if ($null -eq $Snapshot) {
+        return
+    }
+
+    foreach (
+        $name in @(
+            "total",
+            "input",
+            "cachedInput",
+            "output",
+            "reasoningOutput"
+        )
+    ) {
+
+        $value =
+            Get-PropertyValue `
+                -Object $Snapshot `
+                -Name $name
+
+        if ($null -ne $value) {
+
+            $Status["tokenUsage"][$name] =
+                [long]$value
+        }
+    }
+}
+
+
+function Update-ContextWindow {
+
+    param(
+        [object]$Status,
+        [object]$Total,
+        [object]$Used
+    )
+
+    if ($null -ne $Total) {
+
+        try {
+
+            $totalValue =
+                [long]$Total
+
+            if ($totalValue -gt 0) {
+
+                $Status["contextWindow"]["total"] =
+                    $totalValue
+            }
+
+        }
+        catch {
+        }
+    }
+
+
+    if ($null -ne $Used) {
+
+        try {
+
+            $usedValue =
+                [long]$Used
+
+            $knownTotal =
+                $Status["contextWindow"]["total"]
+
+            if (
+                $usedValue -ge 0 -and
+                (
+                    $null -eq $knownTotal -or
+                    $usedValue -le [long]$knownTotal
+                )
+            ) {
+
+                $Status["contextWindow"]["used"] =
+                    $usedValue
+            }
+
+        }
+        catch {
+        }
+    }
+
+
+    $finalTotal =
+        $Status["contextWindow"]["total"]
+
+    $finalUsed =
+        $Status["contextWindow"]["used"]
+
+
+    if (
+        $null -ne $finalTotal -and
+        $null -ne $finalUsed -and
+        [long]$finalTotal -gt 0 -and
+        [long]$finalUsed -le [long]$finalTotal
+    ) {
+
+        $left =
+            100.0 *
+            (
+                [long]$finalTotal -
+                [long]$finalUsed
+            ) /
+            [long]$finalTotal
+
+        $Status["contextWindow"]["percentLeft"] =
+            [int][math]::Round(
+                $left
+            )
+    }
+}
+
+
+function Apply-TokenUsageRecord {
+
     param(
         [object]$Payload,
-
-        [string]$FallbackType
+        [object]$Status
     )
 
-    $toolName = $null
-
-    if ($Payload.name) {
-        $toolName = [string]$Payload.name
-    }
-    elseif ($Payload.tool_name) {
-        $toolName = [string]$Payload.tool_name
-    }
-    else {
-        $toolName = $FallbackType
+    if ($null -eq $Payload) {
+        return
     }
 
-    $details = $null
 
-    if ($Payload.arguments) {
-        $details = Shorten-Text `
-            $Payload.arguments `
-            120
-    }
-    elseif ($Payload.input) {
-        $details = Shorten-Text `
-            $Payload.input `
-            120
+    # --------------------------------------------------------
+    # Lifetime / thread cumulative token usage
+    # --------------------------------------------------------
+
+    $threadUsageObject =
+        Get-PropertyValue `
+            -Object $Payload `
+            -Name "thread_token_usage"
+
+
+    if ($null -eq $threadUsageObject) {
+
+        $usage =
+            Get-PropertyValue `
+                -Object $Payload `
+                -Name "usage"
+
+        if ($usage) {
+
+            $threadUsageObject =
+                Get-PropertyValue `
+                    -Object $usage `
+                    -Name "total_token_usage"
+        }
     }
 
-    if ($details) {
-        return "$toolName -- $details"
+
+    if ($null -eq $threadUsageObject) {
+
+        $threadUsageObject =
+            Get-PropertyValue `
+                -Object $Payload `
+                -Name "usage"
     }
 
-    return $toolName
+
+    $threadSnapshot =
+        Get-UsageSnapshot `
+            -Object $threadUsageObject
+
+
+    Apply-UsageSnapshot `
+        -Snapshot $threadSnapshot `
+        -Status $Status
+
+
+    # --------------------------------------------------------
+    # Current context / latest turn usage
+    # --------------------------------------------------------
+
+    $turnUsageObject =
+        Get-PropertyValue `
+            -Object $Payload `
+            -Name "turn_token_usage"
+
+
+    if ($null -eq $turnUsageObject) {
+
+        $usage =
+            Get-PropertyValue `
+                -Object $Payload `
+                -Name "usage"
+
+        if ($usage) {
+
+            $turnUsageObject =
+                Get-PropertyValue `
+                    -Object $usage `
+                    -Name "last_token_usage"
+        }
+    }
+
+
+    $turnSnapshot =
+        Get-UsageSnapshot `
+            -Object $turnUsageObject
+
+
+    $contextUsed =
+        if ($turnSnapshot) {
+            $turnSnapshot.total
+        }
+        else {
+            $null
+        }
+
+
+    $usageObject =
+        Get-PropertyValue `
+            -Object $Payload `
+            -Name "usage"
+
+
+    $contextTotal =
+        if ($usageObject) {
+
+            Get-FirstNumber @(
+                (
+                    Get-PropertyValue `
+                        $usageObject `
+                        "model_context_window"
+                ),
+                (
+                    Get-PropertyValue `
+                        $usageObject `
+                        "context_window"
+                )
+            )
+
+        }
+        else {
+            $null
+        }
+
+
+    Update-ContextWindow `
+        -Status $Status `
+        -Total $contextTotal `
+        -Used $contextUsed
 }
 
 
 # ============================================================
-# Process one rollout JSONL event
-#
-# -Silent is used during initial history reconstruction.
-# That prevents old events from flooding the terminal.
+# Status object
 # ============================================================
 
-function Process-RolloutEvent {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Line,
+$status =
+    [ordered]@{
 
-        [switch]$Silent
+        version =
+            4
+
+        sessionId =
+            $SessionId
+
+        threadName =
+            $null
+
+        threadNameUpdatedAt =
+            $null
+
+        projectName =
+            $null
+
+        cwd =
+            $null
+
+        rolloutPath =
+            $null
+
+        cliVersion =
+            $null
+
+        model =
+            $null
+
+        reasoningEffort =
+            $null
+
+        modelProvider =
+            $null
+
+        permissions =
+            $null
+
+        approvalPolicy =
+            $null
+
+        collaborationMode =
+            $null
+
+        personality =
+            $null
+
+        tokenUsage =
+            [ordered]@{
+
+                total =
+                    $null
+
+                input =
+                    $null
+
+                cachedInput =
+                    $null
+
+                output =
+                    $null
+
+                reasoningOutput =
+                    $null
+            }
+
+        contextWindow =
+            [ordered]@{
+
+                used =
+                    $null
+
+                total =
+                    $null
+
+                percentLeft =
+                    $null
+            }
+
+        state =
+            "Starting"
+
+        lastActivity =
+            "Observer attached"
+
+        lastEventType =
+            $null
+
+        lastEventTime =
+            $null
+
+        observerPid =
+            $PID
+
+        observerState =
+            "Running"
+
+        observerStartedAt =
+            (Get-Date).ToString("o")
+
+        observerUpdatedAt =
+            (Get-Date).ToString("o")
+    }
+
+
+function Write-Status {
+
+    $status["observerUpdatedAt"] =
+        (Get-Date).ToString("o")
+
+    Write-JsonAtomic `
+        -Path $statusPath `
+        -Value $status
+}
+
+
+# ============================================================
+# Thread-name refresh
+# ============================================================
+
+$script:lastSessionIndexWriteUtc =
+    [datetime]::MinValue
+
+
+function Refresh-ThreadName {
+
+    param(
+        [switch]$Force
     )
 
-    if ([string]::IsNullOrWhiteSpace($Line)) {
+    if (-not (Test-Path $sessionIndexPath)) {
         return
     }
 
     try {
-        $event = $Line |
-            ConvertFrom-Json
+
+        $item =
+            Get-Item `
+                $sessionIndexPath `
+                -ErrorAction Stop
+
+        if (
+            -not $Force -and
+            $item.LastWriteTimeUtc -eq
+            $script:lastSessionIndexWriteUtc
+        ) {
+            return
+        }
+
+        $script:lastSessionIndexWriteUtc =
+            $item.LastWriteTimeUtc
+
+
+        $thread =
+            Get-LatestThreadInfo
+
+
+        if ($thread) {
+
+            if (
+                -not [string]::IsNullOrWhiteSpace(
+                    $thread.ThreadName
+                )
+            ) {
+
+                $status["threadName"] =
+                    $thread.ThreadName
+            }
+
+            $status["threadNameUpdatedAt"] =
+                $thread.UpdatedAt
+        }
+
     }
     catch {
-        # Ignore partial or unknown JSON lines.
+
+        Write-Log (
+            "Unable to refresh thread name: " +
+            $_.Exception.Message
+        )
+    }
+}
+
+
+# ============================================================
+# Event processing
+# ============================================================
+
+function Get-EventTimestamp {
+
+    param(
+        [object]$Event
+    )
+
+    $timestamp =
+        Get-PropertyValue `
+            -Object $Event `
+            -Name "timestamp"
+
+    if ($timestamp) {
+        return [string]$timestamp
+    }
+
+    return (
+        (Get-Date).ToString("o")
+    )
+}
+
+
+function Apply-ThreadSettings {
+
+    param(
+        [object]$Settings
+    )
+
+    if ($null -eq $Settings) {
         return
     }
 
 
-    # --------------------------------------------------------
-    # Common metadata
-    # --------------------------------------------------------
+    $model =
+        Get-PropertyValue `
+            $Settings `
+            "model"
 
-    if ($event.timestamp) {
-        $state.lastEventTime =
-            [string]$event.timestamp
-    }
-
-    if ($event.type) {
-        $state.lastEventType =
-            [string]$event.type
+    if ($model) {
+        $status["model"] =
+            [string]$model
     }
 
 
-    # --------------------------------------------------------
-    # Session metadata
-    # --------------------------------------------------------
+    $provider =
+        Get-PropertyValue `
+            $Settings `
+            "model_provider_id"
 
-    if ($event.type -eq "session_meta") {
+    if ($provider) {
+        $status["modelProvider"] =
+            [string]$provider
+    }
 
-        if ($event.payload.cwd) {
-            $state.cwd =
-                [string]$event.payload.cwd
+
+    $reasoning =
+        Get-PropertyValue `
+            $Settings `
+            "reasoning_effort"
+
+    if ($reasoning) {
+        $status["reasoningEffort"] =
+            [string]$reasoning
+    }
+
+
+    $cwd =
+        Get-PropertyValue `
+            $Settings `
+            "cwd"
+
+    if ($cwd) {
+
+        $status["cwd"] =
+            [string]$cwd
+
+        $status["projectName"] =
+            Get-ProjectName `
+                -Path ([string]$cwd)
+    }
+
+
+    $approval =
+        Get-PropertyValue `
+            $Settings `
+            "approval_policy"
+
+    if ($approval) {
+        $status["approvalPolicy"] =
+            [string]$approval
+    }
+
+
+    $permissionProfile =
+        Get-PropertyValue `
+            $Settings `
+            "permission_profile"
+
+    if ($permissionProfile) {
+
+        $status["permissions"] =
+            Convert-PermissionProfile `
+                -PermissionProfile $permissionProfile
+    }
+
+
+    $personality =
+        Get-PropertyValue `
+            $Settings `
+            "personality"
+
+    if ($personality) {
+        $status["personality"] =
+            [string]$personality
+    }
+
+
+    $collaboration =
+        Get-PropertyValue `
+            $Settings `
+            "collaboration_mode"
+
+    if ($collaboration) {
+
+        $mode =
+            Get-PropertyValue `
+                $collaboration `
+                "mode"
+
+        if ($mode) {
+            $status["collaborationMode"] =
+                [string]$mode
+        }
+    }
+}
+
+
+function Apply-Event {
+
+    param(
+        [object]$Event
+    )
+
+    if ($null -eq $Event) {
+        return
+    }
+
+
+    $outerType =
+        [string](
+            Get-PropertyValue `
+                $Event `
+                "type"
+        )
+
+    $payload =
+        Get-PropertyValue `
+            $Event `
+            "payload"
+
+    $eventTime =
+        Get-EventTimestamp `
+            -Event $Event
+
+
+    $effectiveType =
+        $outerType
+
+
+    if ($payload) {
+
+        $payloadType =
+            Get-PropertyValue `
+                $payload `
+                "type"
+
+        if ($payloadType) {
+
+            # Important:
+            # ${outerType} is required because "$outerType:"
+            # is parsed by PowerShell as a scoped variable.
+            $effectiveType =
+                "${outerType}:$payloadType"
+        }
+    }
+
+
+    $status["lastEventType"] =
+        $effectiveType
+
+    $status["lastEventTime"] =
+        $eventTime
+
+
+    # ========================================================
+    # session_meta
+    # ========================================================
+
+    if ($outerType -eq "session_meta") {
+
+        $cwd =
+            Get-PropertyValue `
+                $payload `
+                "cwd"
+
+        if ($cwd) {
+
+            $status["cwd"] =
+                [string]$cwd
+
+            $status["projectName"] =
+                Get-ProjectName `
+                    -Path ([string]$cwd)
         }
 
+
+        $cliVersion =
+            Get-PropertyValue `
+                $payload `
+                "cli_version"
+
+        if ($cliVersion) {
+            $status["cliVersion"] =
+                [string]$cliVersion
+        }
+
+
+        $provider =
+            Get-PropertyValue `
+                $payload `
+                "model_provider"
+
+        if ($provider) {
+            $status["modelProvider"] =
+                [string]$provider
+        }
+
+
+        $contextWindow =
+            Get-FirstNumber @(
+                (
+                    Get-PropertyValue `
+                        $payload `
+                        "context_window"
+                )
+            )
+
+
+        Update-ContextWindow `
+            -Status $status `
+            -Total $contextWindow `
+            -Used $null
+
+
         return
     }
 
 
-    # --------------------------------------------------------
-    # High-level Codex events
-    # --------------------------------------------------------
+    # ========================================================
+    # turn_context
+    # ========================================================
 
-    if ($event.type -eq "event_msg") {
+    if ($outerType -eq "turn_context") {
 
-        $eventType =
-            [string]$event.payload.type
+        $cwd =
+            Get-PropertyValue `
+                $payload `
+                "cwd"
+
+        if ($cwd) {
+
+            $status["cwd"] =
+                [string]$cwd
+
+            $status["projectName"] =
+                Get-ProjectName `
+                    -Path ([string]$cwd)
+        }
 
 
-        switch -Regex ($eventType) {
+        $model =
+            Get-PropertyValue `
+                $payload `
+                "model"
+
+        if ($model) {
+            $status["model"] =
+                [string]$model
+        }
 
 
-            # ------------------------------------------------
-            # Task started
-            # ------------------------------------------------
+        $approval =
+            Get-PropertyValue `
+                $payload `
+                "approval_policy"
 
-            "^task_started$" {
+        if ($approval) {
+            $status["approvalPolicy"] =
+                [string]$approval
+        }
 
-                $state.state =
+
+        $permission =
+            Get-PropertyValue `
+                $payload `
+                "permission_profile"
+
+        if ($permission) {
+
+            $status["permissions"] =
+                Convert-PermissionProfile `
+                    -PermissionProfile $permission
+        }
+
+
+        $personality =
+            Get-PropertyValue `
+                $payload `
+                "personality"
+
+        if ($personality) {
+            $status["personality"] =
+                [string]$personality
+        }
+
+
+        $collaboration =
+            Get-PropertyValue `
+                $payload `
+                "collaboration_mode"
+
+        if ($collaboration) {
+
+            $mode =
+                Get-PropertyValue `
+                    $collaboration `
+                    "mode"
+
+            if ($mode) {
+                $status["collaborationMode"] =
+                    [string]$mode
+            }
+        }
+
+
+        $status["state"] =
+            "Running"
+
+        $status["lastActivity"] =
+            "Turn in progress"
+
+        return
+    }
+
+
+    # ========================================================
+    # token_usage_record
+    # ========================================================
+
+    if (
+        $outerType -eq
+        "token_usage_record"
+    ) {
+
+        Apply-TokenUsageRecord `
+            -Payload $payload `
+            -Status $status
+
+        return
+    }
+
+
+    # ========================================================
+    # event_msg
+    # ========================================================
+
+    if ($outerType -eq "event_msg") {
+
+        $kind =
+            [string](
+                Get-PropertyValue `
+                    $payload `
+                    "type"
+            )
+
+
+        $threadSettings =
+            Get-PropertyValue `
+                $payload `
+                "thread_settings"
+
+
+        if ($threadSettings) {
+
+            Apply-ThreadSettings `
+                -Settings $threadSettings
+        }
+
+
+        $modelContextWindow =
+            Get-FirstNumber @(
+                (
+                    Get-PropertyValue `
+                        $payload `
+                        "model_context_window"
+                )
+            )
+
+
+        if ($null -ne $modelContextWindow) {
+
+            Update-ContextWindow `
+                -Status $status `
+                -Total $modelContextWindow `
+                -Used $null
+        }
+
+
+        switch -Regex ($kind) {
+
+            "^(task_started|turn_started|turn_start|turn_begin)$" {
+
+                $status["state"] =
                     "Running"
 
-                $state.lastActivity =
-                    "Task started"
+                $status["lastActivity"] =
+                    "Task running"
 
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "RUNNING" `
-                        "Task started" `
-                        Cyan
-                }
-
-                return
+                break
             }
 
 
-            # ------------------------------------------------
-            # Task completed / waiting for next prompt
-            # ------------------------------------------------
+            "^(task_complete|task_completed|turn_complete|turn_completed)$" {
 
-            "^(task_complete|turn_complete|turn_completed)$" {
-
-                $state.state =
+                $status["state"] =
                     "Waiting"
 
-                $state.lastActivity =
+                $status["lastActivity"] =
                     "Task completed; waiting for input"
 
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "WAITING" `
-                        "Task completed; waiting for input" `
-                        Green
-                }
-
-                return
+                break
             }
 
 
-            # ------------------------------------------------
-            # Error / abort / interrupt
-            # ------------------------------------------------
+            "(aborted|cancelled|canceled|interrupted)" {
 
-            "abort|interrupt|cancel|error|fail" {
+                $status["state"] =
+                    "Waiting"
 
-                $state.state =
-                    "Interrupted"
+                $status["lastActivity"] =
+                    "Task interrupted; waiting for input"
 
-                $state.lastActivity =
-                    "Session event: $eventType"
-
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "INTERRUPT" `
-                        $eventType `
-                        Red
-                }
-
-                return
+                break
             }
 
 
-            # ------------------------------------------------
-            # User prompt
-            # ------------------------------------------------
+            "^(item_started|item_start)$" {
 
-            "^user_message$" {
-
-                $state.state =
+                $status["state"] =
                     "Running"
 
-                $message =
-                    Shorten-Text `
-                        $event.payload.message `
-                        160
+                $status["lastActivity"] =
+                    "Processing item"
 
-                if ($message) {
-                    $state.lastActivity =
-                        "User: $message"
-                }
-                else {
-                    $state.lastActivity =
-                        "User message"
-                }
-
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "PROMPT" `
-                        $state.lastActivity `
-                        White
-                }
-
-                return
+                break
             }
 
 
-            # ------------------------------------------------
-            # Item started
-            # ------------------------------------------------
+            "thread_settings_applied" {
 
-            "^item_started$" {
-
-                $state.state =
-                    "Running"
-
-                $itemType = $null
-
-                if ($event.payload.item.type) {
-                    $itemType =
-                        [string]$event.payload.item.type
-                }
-
-                if ($itemType) {
-                    $state.lastActivity =
-                        "Started: $itemType"
-                }
-                else {
-                    $state.lastActivity =
-                        "Codex item started"
-
-                    $itemType =
-                        "item"
-                }
-
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "START" `
-                        $itemType `
-                        DarkCyan
-                }
-
-                return
-            }
-
-
-            # ------------------------------------------------
-            # Item completed
-            # ------------------------------------------------
-
-            "^item_completed$" {
-
-                $state.state =
-                    "Running"
-
-                $itemType = $null
-
-                if ($event.payload.item.type) {
-                    $itemType =
-                        [string]$event.payload.item.type
-                }
-
-                if ($itemType) {
-                    $state.lastActivity =
-                        "Completed: $itemType"
-                }
-                else {
-                    $state.lastActivity =
-                        "Codex item completed"
-
-                    $itemType =
-                        "item"
-                }
-
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "COMPLETE" `
-                        $itemType `
-                        DarkGreen
-                }
-
-                return
+                # Metadata update only.
+                break
             }
         }
+
+
+        return
     }
 
 
-    # --------------------------------------------------------
-    # Model / reasoning / tool activity
-    # --------------------------------------------------------
+    # ========================================================
+    # response_item
+    # ========================================================
 
-    if ($event.type -eq "response_item") {
+    if ($outerType -eq "response_item") {
 
-        $responseType =
-            [string]$event.payload.type
+        $itemType =
+            [string](
+                Get-PropertyValue `
+                    $payload `
+                    "type"
+            )
 
 
-        switch -Regex ($responseType) {
-
-
-            # ------------------------------------------------
-            # Reasoning
-            # ------------------------------------------------
+        switch -Regex ($itemType) {
 
             "^reasoning$" {
 
-                $state.state =
+                $status["state"] =
                     "Running"
 
-                $state.lastActivity =
+                $status["lastActivity"] =
                     "Reasoning"
 
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "REASONING" `
-                        "Model reasoning" `
-                        DarkGray
-                }
-
-                return
+                break
             }
 
 
-            # ------------------------------------------------
-            # Tool call
-            # ------------------------------------------------
+            "(function_call|custom_tool_call|tool_call|web_search_call)" {
 
-            "function_call|custom_tool_call|tool_call" {
-
-                $state.state =
+                $status["state"] =
                     "Running"
 
-                $toolDescription =
-                    Get-ToolDescription `
-                        $event.payload `
-                        $responseType
+                $toolName =
+                    Get-PropertyValue `
+                        $payload `
+                        "name"
 
-                $state.lastActivity =
-                    "Tool: $toolDescription"
+                if ($toolName) {
 
-                Write-MonitorStatus $state
+                    $status["lastActivity"] =
+                        "Tool: $toolName"
 
-                if (-not $Silent) {
-                    Write-Activity `
-                        "TOOL" `
-                        $toolDescription `
-                        Yellow
+                }
+                else {
+
+                    $status["lastActivity"] =
+                        "Tool call"
                 }
 
-                return
+                break
             }
 
 
-            # ------------------------------------------------
-            # Tool output
-            # ------------------------------------------------
+            "(function_call_output|custom_tool_call_output|tool_output)" {
 
-            "function_call_output|tool_output|custom_tool_output" {
-
-                $state.state =
+                $status["state"] =
                     "Running"
 
-                $state.lastActivity =
+                $status["lastActivity"] =
                     "Tool completed"
 
-                Write-MonitorStatus $state
-
-                if (-not $Silent) {
-                    Write-Activity `
-                        "TOOL DONE" `
-                        "Tool returned output" `
-                        DarkYellow
-                }
-
-                return
+                break
             }
 
-
-            # ------------------------------------------------
-            # Assistant response
-            # ------------------------------------------------
 
             "^message$" {
 
-                if (
-                    $event.payload.role -eq
-                    "assistant"
-                ) {
+                $role =
+                    [string](
+                        Get-PropertyValue `
+                            $payload `
+                            "role"
+                    )
 
-                    $state.lastActivity =
-                        "Assistant response generated"
+                if ($role -eq "assistant") {
 
-                    Write-MonitorStatus $state
+                    $status["state"] =
+                        "Running"
 
-                    if (-not $Silent) {
-                        Write-Activity `
-                            "ASSISTANT" `
-                            "Response generated" `
-                            Cyan
-                    }
+                    $status["lastActivity"] =
+                        "Assistant responding"
+
+                }
+                elseif ($role -eq "user") {
+
+                    $status["state"] =
+                        "Running"
+
+                    $status["lastActivity"] =
+                        "User input received"
                 }
 
-                return
+                break
             }
         }
     }
@@ -610,214 +1610,210 @@ function Process-RolloutEvent {
 
 
 # ============================================================
-# Read session metadata from beginning of rollout
-#
-# session_meta normally appears near the beginning, so don't
-# depend on it still being in the last N lines.
+# Locate rollout
 # ============================================================
 
-Write-Host ""
-Write-Host "Reading Session metadata..." `
-    -ForegroundColor Cyan
+if (-not (Test-Path $sessionRoot)) {
 
-$metadataLines = Get-Content `
-    $rollout.FullName `
-    -TotalCount 50
+    Write-Log (
+        "Session directory does not exist: " +
+        $sessionRoot
+    )
 
-foreach ($line in $metadataLines) {
-
-    try {
-        $meta =
-            $line |
-            ConvertFrom-Json
-    }
-    catch {
-        continue
-    }
-
-    if ($meta.type -eq "session_meta") {
-
-        if ($meta.payload.cwd) {
-            $state.cwd =
-                [string]$meta.payload.cwd
-        }
-
-        break
-    }
+    exit 1
 }
 
 
-# ============================================================
-# Reconstruct current state from recent history
-#
-# Silent mode means this updates state without printing old
-# task/tool activity into the observer window.
-# ============================================================
+$rolloutPath =
+    Find-RolloutPath `
+        -Id $SessionId
 
-Write-Host "Reconstructing current Session state..." `
-    -ForegroundColor Cyan
 
-$history = Get-Content `
-    $rollout.FullName `
-    -Tail $HistoryTail
+if (-not $rolloutPath) {
 
-foreach ($line in $history) {
-    Process-RolloutEvent `
-        -Line $line `
-        -Silent
+    Write-Log (
+        "Unable to find rollout for Session " +
+        $SessionId
+    )
+
+    exit 1
 }
 
 
-Write-MonitorStatus $state
+$status["rolloutPath"] =
+    $rolloutPath
+
+
+Refresh-ThreadName -Force
+
+Write-Status
+
+
+Write-Log (
+    "Observer started. " +
+    "Session=$SessionId " +
+    "Rollout=$rolloutPath"
+)
 
 
 # ============================================================
-# Show attached status
+# Follow rollout JSONL read-only
 # ============================================================
 
-Write-Host ""
-Write-Host "Observer attached." `
-    -ForegroundColor Green
+$stream = $null
+$reader = $null
 
-Write-Host ""
-Write-Host "Session  : $SessionId"
-
-if ($state.cwd) {
-    Write-Host "CWD      : $($state.cwd)"
-}
-else {
-    Write-Host "CWD      : <unknown>" `
-        -ForegroundColor Yellow
-}
-
-Write-Host "State    : $($state.state)"
-Write-Host "Activity : $($state.lastActivity)"
-Write-Host "Status   : $statusFile"
-
-Write-Host ""
-Write-Host `
-    "Watching live Codex activity..." `
-    -ForegroundColor Cyan
-
-Write-Host `
-    "Press Ctrl+C to stop ONLY the observer." `
-    -ForegroundColor DarkGray
-
-Write-Host ""
-
-
-# ============================================================
-# Open rollout file read-only
-#
-# FileShare.ReadWrite is critical:
-# Codex keeps writing the rollout while we read it.
-# ============================================================
-
-$fileStream = $null
-$reader     = $null
 
 try {
 
-    $fileStream =
-        [System.IO.File]::Open(
-            $rollout.FullName,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read,
-            [System.IO.FileShare]::ReadWrite
-        )
+    $shareMode =
+        [System.IO.FileShare]::ReadWrite -bor
+        [System.IO.FileShare]::Delete
 
 
-    # Start at EOF.
-    # Historical state was already reconstructed above.
-    $fileStream.Seek(
-        0,
-        [System.IO.SeekOrigin]::End
-    ) | Out-Null
+    $stream =
+        New-Object `
+            System.IO.FileStream(
+                $rolloutPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                $shareMode
+            )
 
 
     $reader =
         New-Object `
             System.IO.StreamReader(
-                $fileStream
+                $stream,
+                [System.Text.Encoding]::UTF8,
+                $true
             )
 
 
-    $lastHeartbeat =
-        Get-Date
+    $initialCatchup =
+        $true
 
 
-    # ========================================================
-    # Live follow loop
-    # ========================================================
+    $nextHeartbeat =
+        (Get-Date).AddSeconds(
+            $HeartbeatSeconds
+        )
+
 
     while ($true) {
 
-        $line =
-            $reader.ReadLine()
+        while (
+            $null -ne (
+                $line =
+                    $reader.ReadLine()
+            )
+        ) {
+
+            if (
+                [string]::IsNullOrWhiteSpace(
+                    $line
+                )
+            ) {
+                continue
+            }
 
 
-        if ($null -ne $line) {
+            try {
 
-            Process-RolloutEvent `
-                -Line $line
+                $event =
+                    $line |
+                    ConvertFrom-Json
 
-            continue
+            }
+            catch {
+
+                continue
+            }
+
+
+            Apply-Event `
+                -Event $event
+
+
+            # During initial catch-up, do not rewrite status
+            # thousands of times for a large resumed Session.
+            if (-not $initialCatchup) {
+
+                Refresh-ThreadName
+
+                Write-Status
+            }
+        }
+
+
+        if ($initialCatchup) {
+
+            Refresh-ThreadName -Force
+
+            Write-Status
+
+            $initialCatchup =
+                $false
+        }
+
+
+        if (
+            (Get-Date) -ge
+            $nextHeartbeat
+        ) {
+
+            Refresh-ThreadName
+
+            Write-Status
+
+
+            $nextHeartbeat =
+                (Get-Date).AddSeconds(
+                    $HeartbeatSeconds
+                )
         }
 
 
         Start-Sleep `
-            -Milliseconds $PollMilliseconds
-
-
-        # ----------------------------------------------------
-        # Observer heartbeat every 5 seconds
-        # ----------------------------------------------------
-
-        $now = Get-Date
-
-        if (
-            ($now - $lastHeartbeat).
-            TotalSeconds -ge 5
-        ) {
-
-            Write-MonitorStatus $state
-
-            $lastHeartbeat =
-                $now
-        }
+            -Milliseconds 200
     }
+
+}
+catch {
+
+    Write-Log (
+        "Observer error: " +
+        $_.Exception.Message
+    )
+
 }
 finally {
-
-    # --------------------------------------------------------
-    # Mark observer itself stopped.
-    #
-    # This does NOT mean the Codex Session exited.
-    # --------------------------------------------------------
-
-    $state.observerState =
-        "Stopped"
-
-    try {
-        Write-MonitorStatus $state
-    }
-    catch {
-        # Ignore status-write failures during shutdown.
-    }
-
 
     if ($reader) {
         $reader.Dispose()
     }
 
-
-    if ($fileStream) {
-        $fileStream.Dispose()
+    if ($stream) {
+        $stream.Dispose()
     }
 
 
-    Write-Host ""
-    Write-Host `
-        "Observer stopped. Codex Session was NOT modified." `
-        -ForegroundColor Yellow
+    try {
+
+        $status["observerState"] =
+            "Stopped"
+
+        $status["observerUpdatedAt"] =
+            (Get-Date).ToString("o")
+
+        Write-JsonAtomic `
+            -Path $statusPath `
+            -Value $status
+
+    }
+    catch {
+    }
+
+
+    Write-Log "Observer stopped."
 }
