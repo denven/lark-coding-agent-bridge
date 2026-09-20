@@ -7,7 +7,7 @@ import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
-import { handleLocalStatus } from './local-status';
+import { handleLocalStatusInteractive } from './local-status';
 import { handleLocalRelease } from './local-release';
 import { handleLocalHandoff } from './local-handoff.js';
 import {
@@ -182,9 +182,12 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  // Scope-oriented aliases. Legacy commands remain registered below for compatibility.
+  '/lark': handleLarkCommand,
+  '/windows': handleWindowsCommand,
+  '/session': handleSessionCommand,
   '/local-status': async (args, ctx) => {
-    const markdown = await handleLocalStatus(args);
-    await reply(ctx, markdown);
+    await handleLocalStatusInteractive(args, ctx);
   },
   '/local-release': async (args, ctx) => {
     const markdown = await handleLocalRelease(args);
@@ -235,6 +238,9 @@ const ADMIN_COMMANDS = new Set([
   '/sessions',
   '/use',
   '/handback',
+  // Grouped aliases for the same sensitive Windows/global Session operations.
+  '/windows',
+  '/session',
   '/cd',
   '/ws',
   '/invite',
@@ -355,6 +361,120 @@ function expandTilde(p: string): string {
 
 function isAbsoluteOrTilde(p: string): boolean {
   return isAbsolute(p) || p === '~' || p.startsWith('~/');
+}
+
+function splitGroupedCommand(args: string): { subcommand: string; rest: string } {
+  const input = args.trim();
+  if (!input) return { subcommand: '', rest: '' };
+
+  const firstSpace = input.search(/\s/);
+  if (firstSpace === -1) {
+    return { subcommand: input.toLowerCase(), rest: '' };
+  }
+
+  return {
+    subcommand: input.slice(0, firstSpace).toLowerCase(),
+    rest: input.slice(firstSpace + 1).trim(),
+  };
+}
+
+/**
+ * Lark-scope Session commands.
+ *
+ * These are aliases over the original /status, /new and /resume handlers.
+ * They operate on the current Lark Chat / Group / Topic scope only.
+ */
+async function handleLarkCommand(args: string, ctx: CommandContext): Promise<void> {
+  const { subcommand, rest } = splitGroupedCommand(args);
+
+  switch (subcommand) {
+    case 'status':
+      await handleStatus(rest, ctx);
+      return;
+    case 'new':
+    case 'reset':
+      await handleNew(rest, ctx);
+      return;
+    case 'resume':
+      await handleResume(rest, ctx);
+      return;
+    default:
+      await reply(
+        ctx,
+        [
+          '💬 **Lark Session**',
+          '',
+          '• **/lark status** — 当前 Lark scope 绑定的 Session',
+          '• **/lark new [chat [name]]** — 新建当前 scope Session，或创建新群',
+          '• **/lark resume [N]** — 查看并恢复当前 scope 的历史 Session',
+          '',
+          '兼容旧命令：**/status**、**/new**、**/reset**、**/resume**',
+        ].join('\n'),
+      );
+  }
+}
+
+/** Windows Codex runtime commands managed by the local Observer/Release Agent. */
+async function handleWindowsCommand(args: string, ctx: CommandContext): Promise<void> {
+  const { subcommand, rest } = splitGroupedCommand(args);
+
+  switch (subcommand) {
+    case 'status': {
+      await handleLocalStatusInteractive(rest, ctx);
+      return;
+    }
+    case 'release': {
+      const markdown = await handleLocalRelease(rest);
+      await reply(ctx, markdown);
+      return;
+    }
+    default:
+      await reply(
+        ctx,
+        [
+          '🖥️ **Windows Codex**',
+          '',
+          '• **/windows status [all|selector]** — 查看 Windows Codex Sessions',
+          '• **/windows release <selector>** — 释放 Waiting 状态的 Windows writer',
+          '',
+          '兼容旧命令：**/local-status**、**/local-release**',
+        ].join('\n'),
+      );
+  }
+}
+
+/** Global Codex Session inventory and ownership-transfer commands. */
+async function handleSessionCommand(args: string, ctx: CommandContext): Promise<void> {
+  const { subcommand, rest } = splitGroupedCommand(args);
+
+  switch (subcommand) {
+    case 'list':
+      await handleLocalSessions(rest, ctx);
+      return;
+    case 'use':
+      await handleLocalUse(rest, ctx);
+      return;
+    case 'handoff':
+      await handleLocalHandoff(rest, ctx);
+      return;
+    case 'handback':
+      await handleLocalHandback(rest, ctx);
+      return;
+    default:
+      await reply(
+        ctx,
+        [
+          '🗂️ **All Codex Sessions**',
+          '',
+          '• **/session list [all|keyword]** — 查看全部 Session、Owner 与状态',
+          '• **/session use <selector>** — Detached Session → 当前 Lark scope',
+          '• **/session handoff <selector>** — Windows → 当前 Lark scope',
+          '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',
+          '',
+          '兼容旧命令：**/sessions**、**/use**、**/local-handoff**、**/handback**',
+        ].join('\n'),
+      );
+  }
 }
 
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
@@ -856,7 +976,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     profileName: ctx.controls.profile,
     cwd,
     sessionId: isCodex ? catalogEntry?.threadId : sess?.sessionId,
-    emptySessionText: isCodex ? '(未建立)' : undefined,
+    emptySessionText: isCodex ? '(not established)' : undefined,
     sessionStale: !isCodex && Boolean(cwd && sess && sess.cwd !== cwd),
     agentName: ctx.agent.displayName,
     runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),

@@ -9,6 +9,7 @@ import {
   type LarkBinding,
   type SessionInventoryItem,
 } from './local-session-state.js';
+import { actions, divMd, shell, type ButtonSpec } from '../card/templates.js';
 
 function clean(
   value: unknown,
@@ -27,19 +28,36 @@ function clean(
     );
 }
 
+function commandReplyOptions(
+  ctx: any,
+): { replyTo: string; replyInThread?: true } {
+  return {
+    replyTo: ctx.msg.messageId,
+    ...(ctx.chatMode === 'topic' && ctx.msg.threadId
+      ? { replyInThread: true as const }
+      : {}),
+  };
+}
+
 async function reply(
   ctx: any,
   markdown: string,
 ): Promise<void> {
   await ctx.channel.send(
     ctx.msg.chatId,
-    {
-      markdown,
-    },
-    {
-      replyTo:
-        ctx.msg.messageId,
-    },
+    { markdown },
+    commandReplyOptions(ctx),
+  );
+}
+
+async function replyCard(
+  ctx: any,
+  card: object,
+): Promise<void> {
+  await ctx.channel.send(
+    ctx.msg.chatId,
+    { card },
+    commandReplyOptions(ctx),
   );
 }
 
@@ -259,6 +277,51 @@ function sessionTitle(
   );
 }
 
+function shortSessionId(
+  sessionId: string,
+): string {
+  if (sessionId.length <= 16) {
+    return sessionId;
+  }
+
+  return `${sessionId.slice(0, 12)}…`;
+}
+
+function normalizeThreadName(
+  value: string | undefined,
+): string | undefined {
+  const name = value?.trim();
+  return name ? name : undefined;
+}
+
+function sessionActionLabel(
+  item: SessionInventoryItem,
+  peers: SessionInventoryItem[],
+): string {
+  /*
+   * Keep the action label human-readable without pretending that a project
+   * directory identifies a Session. Thread names are preferred; duplicate
+   * names get a short Session ID suffix; unnamed Sessions use a short ID.
+   */
+  const threadName = normalizeThreadName(item.threadName);
+
+  if (!threadName) {
+    return shortSessionId(item.sessionId);
+  }
+
+  const duplicateCount = peers.filter(
+    (peer) =>
+      normalizeThreadName(peer.threadName)?.toLocaleLowerCase() ===
+      threadName.toLocaleLowerCase(),
+  ).length;
+
+  if (duplicateCount > 1) {
+    return `${threadName} · ${shortSessionId(item.sessionId)}`;
+  }
+
+  return threadName;
+}
+
 function inventoryForContext(
   ctx: any,
 ): {
@@ -319,286 +382,185 @@ function inventoryForContext(
   };
 }
 
+function sessionActionButtons(
+  ctx: any,
+  item: SessionInventoryItem,
+  bindings: LarkBinding[],
+  peers: SessionInventoryItem[],
+): ButtonSpec[] {
+  const linked = bindingsFor(item, bindings);
+  const current = linked.some((binding) => binding.current);
+  const target = sessionActionLabel(item, peers);
+
+  // A conflicting Windows + Lark ownership state should be inspected before
+  // any one-click transfer action is offered.
+  if (item.handoff.windowsActive && linked.length > 0) {
+    return [];
+  }
+
+  if (current) {
+    return [
+      {
+        text: `↩ Hand Back ${target}`,
+        value: { cmd: 'handback' },
+        style: 'primary',
+        hoverTips: 'Unbind the current Lark scope and make this Session ready to resume on Windows.',
+      },
+    ];
+  }
+
+  // A Session bound to another Lark scope cannot be moved from this scope.
+  if (linked.length > 0) {
+    return [];
+  }
+
+  if (item.handoff.windowsActive) {
+    // Busy Windows sessions are intentionally not given a transfer button.
+    // Ready and needs-validation states may still use the authoritative
+    // PowerShell release chain in handleLocalHandoff().
+    if (item.handoff.code === 'busy') {
+      return [];
+    }
+
+    return [
+      {
+        text: `↪ Handoff ${target}`,
+        value: {
+          cmd: 'local-handoff',
+          // Always target the exact full Session ID; the label is display-only.
+          arg: item.sessionId,
+        },
+        style: 'primary',
+        hoverTips: 'Release the Windows writer and bind this Session to the current Lark scope.',
+      },
+    ];
+  }
+
+  return [
+    {
+      text: `▶ Use ${target}`,
+      value: {
+        cmd: 'use',
+        // Always target the exact full Session ID; the label is display-only.
+        arg: item.sessionId,
+      },
+      style: 'primary',
+      hoverTips: 'Bind this Detached Codex Session to the current Lark scope.',
+    },
+  ];
+}
+
 export async function handleLocalSessions(
   args: string,
   ctx: any,
 ): Promise<void> {
-  if (
-    !isCodexContext(
-      ctx,
-    )
-  ) {
-    await reply(
-      ctx,
-      '❌ `/sessions` 仅适用于 Codex agent。',
-    );
-
+  if (!isCodexContext(ctx)) {
+    await reply(ctx, '❌ **/session list** is only available for the Codex agent.');
     return;
   }
 
-  const input =
-    args.trim();
+  const input = args.trim();
+  const showAll = input.toLowerCase() === 'all';
+  const keyword = showAll ? '' : input.toLowerCase();
+  const { items, bindings } = inventoryForContext(ctx);
 
-  const showAll =
-    input.toLowerCase() ===
-    'all';
-
-  const keyword =
-    showAll
-      ? ''
-      : input.toLowerCase();
-
-  const {
-    items,
-    bindings,
-  } =
-    inventoryForContext(
-      ctx,
-    );
-
-  let candidates =
-    items;
+  let candidates = items;
 
   if (keyword) {
-    candidates =
-      items.filter(
-        (item) =>
-          item.sessionId
-            .toLowerCase()
-            .includes(
-              keyword,
-            ) ||
-          item.threadName
-            ?.toLowerCase()
-            .includes(
-              keyword,
-            ) ||
-          item.projectName
-            ?.toLowerCase()
-            .includes(
-              keyword,
-            ),
-      );
+    candidates = items.filter(
+      (item) =>
+        item.sessionId.toLowerCase().includes(keyword) ||
+        item.threadName?.toLowerCase().includes(keyword) ||
+        item.projectName?.toLowerCase().includes(keyword),
+    );
   }
   else if (!showAll) {
-    /*
-     * Default view:
-     *
-     * all currently-owned sessions
-     * +
-     * a small recent detached history.
-     */
-    const important =
-      items.filter(
-        (item) =>
-          item.handoff
-            .windowsActive ||
-          bindingsFor(
-            item,
-            bindings,
-          ).length >
-            0,
-      );
+    // Default view: all currently-owned sessions + a small recent detached history.
+    const important = items.filter(
+      (item) => item.handoff.windowsActive || bindingsFor(item, bindings).length > 0,
+    );
+    const detached = items
+      .filter(
+        (item) => !item.handoff.windowsActive && bindingsFor(item, bindings).length === 0,
+      )
+      .slice(0, 10);
 
-    const detached =
-      items
-        .filter(
-          (item) =>
-            !item.handoff
-              .windowsActive &&
-            bindingsFor(
-              item,
-              bindings,
-            ).length ===
-              0,
-        )
-        .slice(
-          0,
-          10,
-        );
-
-    candidates =
-      [
-        ...important,
-        ...detached,
-      ];
-
-    const seen =
-      new Set<string>();
-
-    candidates =
-      candidates.filter(
-        (item) => {
-          if (
-            seen.has(
-              item.sessionId,
-            )
-          ) {
-            return false;
-          }
-
-          seen.add(
-            item.sessionId,
-          );
-
-          return true;
-        },
-      );
+    candidates = [...important, ...detached];
+    const seen = new Set<string>();
+    candidates = candidates.filter((item) => {
+      if (seen.has(item.sessionId)) return false;
+      seen.add(item.sessionId);
+      return true;
+    });
   }
 
-  const limit =
-    showAll
-      ? 30
-      : 20;
+  const limit = showAll ? 30 : 20;
+  candidates = candidates.slice(0, limit).map(hydrateInventoryItem);
 
-  candidates =
-    candidates
-      .slice(
-        0,
-        limit,
-      )
-      .map(
-        hydrateInventoryItem,
-      );
-
-  if (
-    candidates.length === 0
-  ) {
+  if (candidates.length === 0) {
     await reply(
       ctx,
       keyword
-        ? `没有找到匹配 \`${clean(
-            input,
-          )}\` 的 Codex Session。`
-        : '当前没有找到 Codex Session。',
+        ? `No Codex Session matched **${clean(input)}**.`
+        : 'No Codex Sessions were found.',
     );
-
     return;
   }
 
-  const lines: string[] = [
-    '## Codex Sessions',
-    '',
-  ];
+  const elements: object[] = [];
 
-  let index = 0;
+  for (const [idx, item] of candidates.entries()) {
+    const linked = bindingsFor(item, bindings);
+    const current = linked.some((binding) => binding.current);
+    const prefix = current ? '▶' : item.handoff.windowsActive ? '🖥' : '○';
+    const lines: string[] = [
+      `${prefix} **${idx + 1}. ${clean(sessionTitle(item))}**`,
+    ];
 
-  for (
-    const item of candidates
-  ) {
-    index += 1;
-
-    const linked =
-      bindingsFor(
-        item,
-        bindings,
-      );
-
-    const current =
-      linked.some(
-        (binding) =>
-          binding.current,
-      );
-
-    const prefix =
-      current
-        ? '▶'
-        : (
-            item.handoff
-              .windowsActive
-              ? '🖥'
-              : '○'
-          );
-
-    lines.push(
-      `${prefix} **${index}. ${clean(
-        sessionTitle(
-          item,
-        ),
-      )}**`,
-    );
-
-    if (
-      item.projectName
-    ) {
-      lines.push(
-        `   📁 ${clean(
-          item.projectName,
-        )}`,
-      );
+    if (item.projectName) {
+      lines.push(`📁 ${clean(item.projectName)}`);
     }
 
-    lines.push(
-      `   🔗 \`${clean(
-        item.sessionId,
-      )}\``,
-    );
+    lines.push(`🔗 ${clean(item.sessionId)}`);
+    lines.push(`👤 Owner: **${clean(ownerText(ctx, item, bindings))}**`);
 
-    lines.push(
-      `   👤 Owner: **${clean(
-        ownerText(
-          ctx,
-          item,
-          bindings,
-        ),
-      )}**`,
-    );
-
-    if (
-      item.handoff
-        .windowsActive
-    ) {
-      lines.push(
-        `   🔄 Handoff: ${formatHandoffState(
-          item.handoff,
-        )}`,
-      );
+    if (item.handoff.windowsActive) {
+      lines.push(`🔄 Handoff: ${formatHandoffState(item.handoff)}`);
     }
 
-    if (
-      item.cwd
-    ) {
-      lines.push(
-        `   📂 \`${clean(
-          item.cwd,
-        )}\``,
-      );
+    if (item.cwd) {
+      lines.push(`📂 ${clean(item.cwd)}`);
     }
 
-    lines.push(
-      `   🕒 ${formatUpdated(
-        item.updatedAtMs,
-      )}`,
-      '',
-    );
+    lines.push(`🕒 ${formatUpdated(item.updatedAtMs)}`);
+    elements.push(divMd(lines.join('\n')));
+
+    const buttons = sessionActionButtons(ctx, item, bindings, candidates);
+    if (buttons.length > 0) {
+      elements.push(actions(buttons));
+    }
+
+    if (idx < candidates.length - 1) {
+      elements.push({ tag: 'hr' });
+    }
   }
 
-  lines.push(
-    '---',
-    '',
-    '`/use <Thread名称|Session-ID前缀>`：切换到 Detached Session',
-    '',
-    '`/local-handoff <...>`：Windows → 当前 Lark scope',
-    '',
-    '`/handback`：当前 Lark scope → Detached',
+  elements.push({ tag: 'hr' });
+  elements.push(
+    divMd(
+      [
+        '**Session actions**',
+        '• **Use in this Lark** — Detached Session → current Lark scope',
+        '• **Handoff to this Lark** — Windows → current Lark scope',
+        '• **Hand Back to Windows** — current Lark scope → Detached / Windows-ready',
+        ...(!showAll && !keyword && items.length > candidates.length
+          ? ['', 'Use **/session list all** to show more Session history.']
+          : []),
+      ].join('\n'),
+    ),
   );
 
-  if (
-    !showAll &&
-    !keyword &&
-    items.length >
-      candidates.length
-  ) {
-    lines.push(
-      '',
-      '使用 `/sessions all` 查看更多历史 Session。',
-    );
-  }
-
-  await reply(
-    ctx,
-    lines.join('\n'),
-  );
+  await replyCard(ctx, shell('🗂️ All Codex Sessions', elements));
 }
 
 function targetResolveError(
@@ -609,7 +571,7 @@ function targetResolveError(
     '',
     message,
     '',
-    '可以先使用 `/sessions` 查看。',
+    '可以先使用 **/session list** 查看。',
   ].join('\n');
 }
 
@@ -644,7 +606,7 @@ export async function handleLocalUse(
   ) {
     await reply(
       ctx,
-      '❌ `/use` 仅适用于 Codex agent。',
+      '❌ **/session use** 仅适用于 Codex agent。',
     );
 
     return;
@@ -659,11 +621,11 @@ export async function handleLocalUse(
       [
         '用法：',
         '',
-        '`/use <Thread名称或Session-ID前缀>`',
+        '**/session use <Thread名称或Session-ID前缀>**',
         '',
         '例如：',
         '',
-        '`/use Calculate 1+2`',
+        '**/session use Calculate 1+2**',
       ].join('\n'),
     );
 
@@ -767,7 +729,7 @@ export async function handleLocalUse(
           ),
         )}`,
         '',
-        '请先在原 Group / Chat 中执行 `/handback`。',
+        '请先在原 Group / Chat 中执行 **/session handback**。',
       ].join('\n'),
     );
 
@@ -791,14 +753,14 @@ export async function handleLocalUse(
             target.handoff,
           )}`,
           '',
-          '不要使用 `/use`。',
+          '不要使用 **/session use**。',
           '',
-          `请使用：\`/local-handoff ${clean(
+          `请使用：**/session handoff ${clean(
             target.sessionId.slice(
               0,
               12,
             ),
-          )}\``,
+          )}**`,
         ].join('\n'),
       );
     }
@@ -812,7 +774,7 @@ export async function handleLocalUse(
             target.handoff,
           )}`,
           '',
-          '当前不能安全 `/use`。',
+          '当前不能安全执行 **/session use**。',
         ].join('\n'),
       );
     }
@@ -928,7 +890,7 @@ export async function handleLocalHandback(
   ) {
     await reply(
       ctx,
-      '❌ `/handback` 仅适用于 Codex agent。',
+      '❌ **/session handback** 仅适用于 Codex agent。',
     );
 
     return;

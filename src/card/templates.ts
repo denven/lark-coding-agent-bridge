@@ -1,7 +1,9 @@
-interface ButtonSpec {
+export interface ButtonSpec {
   text: string;
   value: Record<string, unknown>;
   style?: 'primary' | 'danger' | 'default';
+  /** Optional PC hover description. Mobile clients still rely on the button label itself. */
+  hoverTips?: string;
 }
 
 function button(spec: ButtonSpec): object {
@@ -10,20 +12,28 @@ function button(spec: ButtonSpec): object {
     text: { tag: 'plain_text', content: spec.text },
     type: spec.style ?? 'default',
     value: spec.value,
+    ...(spec.hoverTips
+      ? {
+          hover_tips: {
+            tag: 'plain_text',
+            content: spec.hoverTips,
+          },
+        }
+      : {}),
   };
 }
 
-function divMd(content: string): object {
+export function divMd(content: string): object {
   return { tag: 'div', text: { tag: 'lark_md', content } };
 }
 
-function actions(buttons: ButtonSpec[]): object {
+export function actions(buttons: ButtonSpec[]): object {
   return { tag: 'action', actions: buttons.map(button) };
 }
 
 const HR: object = { tag: 'hr' };
 
-function shell(title: string, elements: object[]): object {
+export function shell(title: string, elements: object[]): object {
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: { title: { tag: 'plain_text', content: title } },
@@ -86,15 +96,15 @@ export interface StatusInfo {
 
 export function statusCard(info: StatusInfo): object {
   const sessionLine = info.sessionId
-    ? `\`${info.sessionId.slice(0, 8)}…\`${info.sessionStale ? ' ⚠️ 旧 cwd，下一条会新建' : ''}`
-    : (info.emptySessionText ?? '(无)');
+    ? `\`${info.sessionId.slice(0, 8)}…\`${info.sessionStale ? ' ⚠️ stale cwd; the next message will create a new session' : ''}`
+    : (info.emptySessionText ?? '(none)');
   // For topic groups, surface that the scope is per-topic so the user
   // knows /cd / /new only affect this topic.
   const scopeLine =
     info.chatMode === 'topic'
-      ? `\`${escapeCode(info.scope)}\` _（话题独立 session）_`
+      ? `\`${escapeCode(info.scope)}\` _(topic-scoped session)_`
       : `\`${escapeCode(info.scope)}\``;
-  const cwdLine = info.cwd ? `\`${escapeCode(info.cwd)}\`` : '(未设置)';
+  const cwdLine = info.cwd ? `\`${escapeCode(info.cwd)}\`` : '(not set)';
   const queueLine = info.queue
     ? `${info.queue.active}/${info.queue.cap} active, ${info.queue.waiting} waiting`
     : 'unknown';
@@ -120,14 +130,31 @@ export function statusCard(info: StatusInfo): object {
     `🚦 **queue**: ${queueLine}`,
     `👤 **owner API**: ${escapeMd(info.ownerState)}`,
   ];
-  return shell('📊 当前状态', [
+  return shell('💬 Lark Session Status', [
     divMd(lines.join('\n')),
     HR,
     actions([
-      { text: '🆕 新会话', value: { cmd: 'new' }, style: 'primary' },
-      { text: '🔁 恢复会话', value: { cmd: 'resume' } },
-      { text: '📂 工作目录', value: { cmd: 'ws.list' } },
-      { text: '💡 帮助', value: { cmd: 'help' } },
+      {
+        text: '🆕 New Lark Session',
+        value: { cmd: 'new' },
+        style: 'primary',
+        hoverTips: 'Clear the current Lark scope binding; the next message will create a new Session.',
+      },
+      {
+        text: '🔁 Resume Lark Session',
+        value: { cmd: 'resume' },
+        hoverTips: 'List and resume Codex Sessions available to the current Lark scope and workspace.',
+      },
+      {
+        text: '📂 Workspace',
+        value: { cmd: 'ws.list' },
+        hoverTips: 'View and switch workspaces available to the current Lark scope.',
+      },
+      {
+        text: '💡 Help',
+        value: { cmd: 'help' },
+        hoverTips: 'View Lark, Windows, and global Codex Session management commands.',
+      },
     ]),
   ]);
 }
@@ -182,41 +209,81 @@ export function helpCard(agentName = 'Agent'): object {
   return shell('💡 使用帮助', [
     divMd(
       [
-        '**命令列表**',
+        '**💬 Lark Session**',
         '',
-        '- `/new` `/reset` — 清空当前 chat 的会话',
-        '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
-        '- `/resume [N]` — 列出并恢复历史会话（最多 N 条）',
-        '- `/cd <path>` — 切换工作目录（会重置 session）',
-        '- `/ws list|save <name>|use <name>|remove <name>` — 工作目录',
-        '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
-        '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
-        '- `/status` — 当前状态',
-        '- `/local-status [all|Session-ID前缀]` — 查看全部或指定 Windows Codex Session',
-        '- `/local-release <Session-ID前缀>` — 释放 Waiting 状态的 Windows Codex writer',
-		'- `/local-handoff <Thread名称或Session-ID前缀>` — 安全释放 Windows Codex writer 并由当前 Lark 会话接管',
-		'- `/handback` — 当前 Lark scope 解除 Session 绑定，准备交回 Windows',
-		'- `/sessions [all|keyword]` — 查看 Codex Session、Owner 与状态',
-		'- `/use <Thread名称|Session-ID前缀>` — 当前 Lark scope 切换到 Detached Session',
-        '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
-        '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
-        '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
-        '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',
-        '- `/ps` — 列出本机所有 bot,标识当前正在回复的那个',
-        '- `/exit <id|#>` — 关掉指定 bot(用 `/ps` 看 id/序号)',
-        '- `/reconnect` — 强制重连 WebSocket(网络抖动后 bot 没反应时用)',
-        `- \`/doctor [描述]\` — 把日志和描述交给 ${escapedAgentName} 自助诊断`,
-        '- `/help` — 本帮助',
+        '当前 Lark Chat / Group / Topic 与 Codex Session 的绑定。',
+        '',
+        '• **/lark status** — 查看当前 Lark scope 绑定的 Codex Session',
+        '• **/lark new [chat [name]]** — 清除当前绑定并新建 Session；也可创建新群',
+        '• **/lark resume [N]** — 查看并恢复当前 Lark scope 的历史 Session',
+        '',
+        '兼容旧命令：**/status**、**/new**、**/reset**、**/resume**',
+        '',
+        '**🖥️ Windows Codex**',
+        '',
+        'Windows Terminal 中由本地 Observer / Release Agent 管理的 Codex Session。',
+        '',
+        '• **/windows status [all|selector]** — 查看全部或指定 Windows Codex Session',
+        '• **/windows release <selector>** — 释放 Waiting 状态的 Windows Codex writer',
+        '',
+        '兼容旧命令：**/local-status**、**/local-release**',
+        '',
+        '**🗂️ All Codex Sessions**',
+        '',
+        '跨 Windows 与 Lark 的全局 Session inventory 和 ownership 管理。',
+        '',
+        '• **/session list [all|keyword]** — 查看 Codex Sessions、Owner 与状态',
+        '• **/session use <selector>** — Detached Session → 当前 Lark scope',
+        '• **/session handoff <selector>** — Windows → 当前 Lark scope',
+        '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',
+        '',
+        '兼容旧命令：**/sessions**、**/use**、**/local-handoff**、**/handback**',
+        '',
+        '**📂 Workspace & Configuration**',
+        '',
+        '• **/cd <path>** — 切换当前 Lark scope 的工作目录（会重置 Session）',
+        '• **/ws list|save <name>|use <name>|remove <name>** — 管理工作目录',
+        '• **/account** — 查看当前应用；**/account change** 更换 appId / secret 并重连',
+        '• **/config** — 调整偏好、访问控制和 lark-cli 身份策略',
+        '',
+        '**⚙️ Process & Diagnostics**',
+        '',
+        '• **/stop** — 结束当前正在运行的任务',
+        '• **/stop comment:<scopeHash>** — 管理员停止云文档评论任务',
+        '• **/timeout [N|off|default]** — 设置当前 Session 的探活时间',
+        '• **/timeout comment:<scopeHash> N** — 管理员设置云文档评论任务探活',
+        '• **/ps** — 列出本机所有 bot',
+        '• **/exit <id|#>** — 关闭指定 bot',
+        '• **/reconnect** — 强制重连 WebSocket',
+        `• **/doctor [描述]** — 把日志和描述交给 ${escapedAgentName} 自助诊断`,
+        '• **/help** — 显示本帮助',
         '',
         `其他内容直接交给 ${escapedAgentName}。`,
       ].join('\n'),
     ),
     HR,
     actions([
-      { text: '📊 状态', value: { cmd: 'status' }, style: 'primary' },
-      { text: '🔁 恢复会话', value: { cmd: 'resume' } },
-      { text: '📂 工作目录', value: { cmd: 'ws.list' } },
-      { text: '🆕 新会话', value: { cmd: 'new' } },
+      {
+        text: '💬 Lark Status',
+        value: { cmd: 'status' },
+        style: 'primary',
+        hoverTips: '查看当前 Lark Chat / Group / Topic 绑定的 Codex Session',
+      },
+      {
+        text: '🔁 Lark Resume',
+        value: { cmd: 'resume' },
+        hoverTips: '查看并恢复当前 Lark scope 的历史 Session',
+      },
+      {
+        text: '📂 Workspace',
+        value: { cmd: 'ws.list' },
+        hoverTips: '查看和切换当前 Lark scope 的工作目录',
+      },
+      {
+        text: '🆕 Lark Session',
+        value: { cmd: 'new' },
+        hoverTips: '清除当前 Lark Session 绑定；下一条消息会建立新 Session',
+      },
     ]),
   ]);
 }

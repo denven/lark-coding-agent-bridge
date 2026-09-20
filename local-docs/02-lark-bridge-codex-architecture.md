@@ -2,470 +2,133 @@
 
 **English** | [简体中文](./02-lark-bridge-codex-architecture.zh-CN.md)
 
-This document explains how Lark, `lark-channel-bridge`, Codex CLI, the Windows Observer, the Release Agent, and persistent Codex sessions work together in this local extension.
-
----
-
-## 1. Major Components
-
-### Lark / Feishu
-
-The user-facing transport:
+The local extension uses three explicit session-management layers and exposes them through Lark interactive cards:
 
 ```text
-Direct Message
-Group
-Topic
-Document/comment thread
+Lark Scope
+→ /lark status | /lark new | /lark resume
+
+Windows Runtime
+→ /windows status | /windows release
+
+Global Session Manager
+→ /session list | /session use | /session handoff | /session handback
 ```
 
-Different chats/groups can form independent bridge scopes.
+Legacy commands remain compatibility aliases.
 
-### lark-channel-bridge
-
-Responsibilities include:
+## Ownership model
 
 ```text
-receive Lark events
-maintain scope → cwd/session bindings
-start or resume Codex runs
-stream output back to Lark
-persist profile/workspace/session state
-handle local commands such as /sessions and /local-handoff
+Codex Session
+├─ Windows
+├─ Lark scope
+└─ Detached / Unknown
 ```
 
-### Codex CLI
+Only one logical writer should own a session at a time. Thread names are display metadata; the exact full Session ID is the execution identity for release, use, and handoff actions.
 
-The actual coding agent that reads/writes files, executes tools, and maintains persistent thread/session context.
+## Lark interaction layer
 
-### Windows Monitor / Handoff Layer
+The three command layers are also three UI views:
 
-Local extension:
+```text
+/lark status
+→ current Lark scope view
+
+/windows status
+→ Windows runtime view
+
+/session list
+→ global ownership/inventory view
+```
+
+The card layer makes the bridge practical for remote control from **Lark Mobile App** and **Lark Web**:
+
+- `/lark status` exposes current-scope actions.
+- `/windows status` adds one-click Release actions for releasable Windows sessions.
+- `/session list` adds ownership-aware Use, Handoff, and Hand Back actions.
+- Web/Desktop clients can display `hover_tips`; mobile clients rely on concise button labels.
+
+The label/target rule is intentionally asymmetric:
+
+```text
+Human-visible label
+Thread Name
+→ duplicate Thread Name + short Session ID
+→ short Session ID when unnamed
+
+Machine target
+exact full Session ID
+```
+
+A Project Name or cwd may be shown as supporting metadata, but is not a session identity because multiple sessions may share the same project or directory.
+
+## Windows → Lark
+
+```text
+/windows status
+/session handoff <selector>
+```
+
+The handoff sequence is always:
+
+```text
+validate Windows session
+→ release Windows writer
+→ bind the Lark scope
+```
+
+The bridge must never bind Lark first and release Windows afterward. A card action may display a Thread Name, but it passes the exact Session ID to the underlying handoff/release path.
+
+## Lark → Windows
+
+```text
+/session handback
+```
+
+The bridge removes the current Lark binding, preserves the Codex history, and returns a `codex3 resume <Session-ID>` command.
+
+## Detached → Lark
+
+```text
+/session use <selector>
+```
+
+`/session use` only binds an already detached session. It does not terminate a Windows writer. If Windows still owns the target, the correct operation is `/session handoff`.
+
+## Global inventory
+
+```text
+/session list
+```
+
+The inventory combines Codex history/index data, rollout metadata, Windows monitor state, and Lark scope bindings. Ownership may be reported as Windows, Lark, Detached, or Unknown / Unmanaged.
+
+The interactive inventory renders actions according to ownership:
+
+```text
+Detached      → Use in this Lark
+Windows       → Handoff to this Lark
+Lark · Current → Hand Back to Windows
+```
+
+Unsafe or ambiguous actions are not exposed merely for convenience; the underlying handlers still perform their normal validation.
+
+## Windows monitor
+
+The Windows layer uses:
 
 ```text
 Attach-CodexObserver.ps1
 Watch-CodexSession.ps1
 Watch-CodexRelease.ps1
+Request-CodexRelease.ps1
 Release-CodexSession.ps1
 ```
 
-It observes already-running Windows Codex sessions and provides safe writer release.
+`/windows status` is a runtime view. `/lark status` is a current-scope view. `/session list` is the global inventory view.
 
----
+## Why this helps remote workflows
 
-## 2. Normal Lark → Codex Flow
-
-```mermaid
-sequenceDiagram
-    participant U as "User"
-    participant L as "Lark"
-    participant B as "lark-channel-bridge"
-    participant S as "Session Store"
-    participant C as "Codex CLI"
-
-    U->>L: normal message
-    L->>B: message event
-    B->>S: resolve scope cwd/sessionId
-    B->>C: start/resume Codex
-    C-->>B: stream/result
-    B-->>L: card/markdown
-    L-->>U: response
-```
-
----
-
-## 3. Why Lark Groups Matter
-
-One bot/agent can serve multiple chats:
-
-```text
-Agent
-├─ Direct Message scope A
-├─ AcuPilot Group scope B
-├─ Booking Group scope C
-└─ Bridge-Dev Group scope D
-```
-
-Each scope can retain:
-
-```text
-cwd
-sessionId
-agent kind
-```
-
-For long-running development, a group effectively acts like a persistent workspace/bookmark.
-
----
-
-## 4. Codex Session Persistence
-
-Example third-party home:
-
-```text
-%USERPROFILE%\.codex-cli-thirdparty\
-```
-
-Important files:
-
-```text
-session_index.jsonl
-
-sessions/
-└─ YYYY/MM/DD/
-   └─ rollout-<timestamp>-<SessionId>.jsonl
-```
-
-Rollout is an event log. Observed event types include:
-
-```text
-session_meta
-turn_context
-event_msg
-response_item
-token_usage_record
-world_state
-```
-
-`session_index.jsonl` is especially useful for thread names and rename history.
-
-For deeper details, see:
-
-[03-codex-session-management.md](./03-codex-session-management.md)
-
----
-
-## 5. Windows Process Model
-
-Typical tree:
-
-```text
-powershell.exe
-└─ node.exe
-   └─ codex.exe
-```
-
-Additional helper processes run separately:
-
-```text
-Watch-CodexSession.ps1
-Watch-CodexRelease.ps1
-```
-
-Design rule:
-
-```text
-Never kill the owner PowerShell / Windows Terminal.
-Release only the Codex writer.
-```
-
----
-
-## 6. Attach Lifecycle
-
-```mermaid
-flowchart TD
-    A["codex3 starts"] --> B["Record LaunchId/CWD/owner PID"]
-    B --> C["Find Codex process"]
-    C --> D["Wait for matching session/rollout"]
-    D --> E["Claim Session"]
-    E --> F["Start Observer"]
-    E --> G["Start Release Agent"]
-    F --> H["status-SessionId.json"]
-    G --> I["Wait for release requests"]
-    E --> J["launch mapping"]
-```
-
-A newly opened Codex TUI may exist before a persistent rollout/session has been created. Such a process is best considered a **Pending Launch**, not yet a fully discovered session.
-
----
-
-## 7. Observer
-
-The Observer is read-only.
-
-It reads rollout/session metadata and writes:
-
-```text
-%USERPROFILE%\.codex-monitor\status-<SessionId>.json
-```
-
-Typical fields:
-
-```json
-{
-  "sessionId": "...",
-  "threadName": "...",
-  "projectName": "AcuPilot",
-  "cwd": "E:\\AI_Tools\\codex\\AcuPilot",
-  "model": "gpt-5.6-sol",
-  "reasoningEffort": "xhigh",
-  "modelProvider": "aipor",
-  "state": "Waiting",
-  "observerState": "Running",
-  "observerPid": 12345
-}
-```
-
-`Observer: Running` means the watcher is alive. `state=Waiting` means the current Codex turn has completed and is waiting for new input. These are independent dimensions.
-
----
-
-## 8. Release Agent
-
-The Attach process also starts:
-
-```text
-Watch-CodexRelease.ps1
-```
-
-The bridge does not directly kill the Windows Codex process. Instead it submits a local request:
-
-```mermaid
-sequenceDiagram
-    participant L as "Lark Bridge"
-    participant R as "Request-CodexRelease.ps1"
-    participant Q as "Request JSON"
-    participant A as "Watch-CodexRelease.ps1"
-    participant X as "Release-CodexSession.ps1"
-    participant C as "Codex Writer"
-
-    L->>R: release Session
-    R->>Q: write request
-    A->>Q: consume request
-    A->>X: validate target
-    X->>C: terminate writer
-    X-->>A: RELEASED / ERROR
-    A-->>R: result JSON
-    R-->>L: OK|RELEASED|...
-```
-
-The PowerShell layer performs the authoritative safety validation.
-
----
-
-## 9. `.codex-monitor`
-
-Typical layout:
-
-```text
-.codex-monitor/
-├─ status-<SessionId>.json
-├─ claims/
-├─ launches/
-├─ requests/
-├─ results/
-└─ logs/
-```
-
-Launch metadata can include:
-
-```text
-launchId
-sessionId
-cwd
-codexHome
-ownerPowerShellPid
-codexRootPid
-observerPid
-releaseAgentPid
-attachedAt
-```
-
----
-
-## 10. Windows → Lark Handoff
-
-```text
-/local-handoff <Thread-name-or-Session-ID-prefix>
-```
-
-```mermaid
-flowchart TD
-    A["/local-handoff"] --> B["Resolve unique Session"]
-    B --> C{"Bound to another Lark scope?"}
-    C -- Yes --> X["Reject: handback from original scope"]
-    C -- No --> D{"Windows session busy?"}
-    D -- Yes --> Y["Reject: wait for current turn"]
-    D -- No --> E["Request-CodexRelease"]
-    E --> F{"PowerShell release successful?"}
-    F -- No --> Z["Do not alter Lark binding"]
-    F -- Yes --> G["Set scope cwd"]
-    G --> H["Set scope sessionId"]
-    H --> I["Next normal Lark message resumes the same Session"]
-```
-
-The order must be:
-
-```text
-release Windows successfully
-        ↓
-bind Lark
-```
-
-not the reverse.
-
----
-
-## 11. Lark → Windows Handback
-
-```text
-/handback
-```
-
-This removes the current scope/session binding but preserves Codex history, then returns a Windows resume command.
-
----
-
-## 12. `/sessions`
-
-The session inventory combines:
-
-```text
-Codex session_index
-rollout metadata
-Windows monitor state
-Lark scope bindings
-```
-
-Potential owner states:
-
-```text
-Windows
-Lark · Current
-Lark · another scope/group
-Detached
-Unknown / Unmanaged
-```
-
-An older Windows TUI that was never attached to the new monitor may be **Unknown / Unmanaged**, even though the Codex process is visibly running.
-
----
-
-## 13. `/use`
-
-`/use <Session>` binds the current Lark scope to an already Detached session. It should not terminate a Windows writer.
-
-If the target is Windows-owned, use:
-
-```text
-/local-handoff
-```
-
----
-
-## 14. `/local-release`
-
-A lower-level primitive:
-
-```text
-release Windows writer
-do not automatically bind the current Lark scope
-```
-
-Useful for debugging or when another client will resume the session later.
-
----
-
-## 15. Handoff State
-
-Treat it as a UI pre-check, not the final safety authority:
-
-```text
-🟢 Ready
-🔵 Busy
-🟡 Needs validation
-⚪ Detached
-```
-
-The PowerShell release chain performs final validation.
-
----
-
-## 16. Repeated Ownership Transfers
-
-Target lifecycle:
-
-```text
-Windows
-   │
-   │ /local-handoff
-   ▼
-Lark Group
-   │
-   │ /handback
-   ▼
-Detached
-   │
-   │ codex3 resume
-   ▼
-Windows
-```
-
-This can repeat while preserving the same session history.
-
----
-
-## 17. Troubleshooting
-
-Latest Attach log:
-
-```powershell
-$log =
-    Get-ChildItem "$HOME\.codex-monitor\logs\attach-*.log" |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-
-Get-Content $log.FullName -Tail 50
-```
-
-Healthy attach:
-
-```text
-Codex process discovered...
-Claimed Session ...
-Observer PID=...
-Release Agent PID=...
-Launch mapping written...
-Attach completed.
-```
-
----
-
-## 18. Upstream vs Local Extension
-
-Upstream:
-
-```text
-Lark transport
-PersonalAgent
-per-chat/topic sessions
-workspaces
-agent adapters
-streaming UI
-access control
-service management
-```
-
-Local extension:
-
-```text
-Windows Codex TUI discovery
-rollout observer
-release agent
-Windows ownership
-handoff / handback
-cross-scope session inventory
-```
-
-Keeping this boundary clear makes upstream upgrades easier.
-
----
-
-## 19. References
-
-- Upstream project: https://github.com/zarazhangrui/lark-coding-agent-bridge
-- Codex CLI: https://developers.openai.com/codex/cli
-- Codex App Server: https://developers.openai.com/docs/app-server
-- Codex source: https://github.com/openai/codex
-- Session internals: [03-codex-session-management.md](./03-codex-session-management.md)
+The original bridge already supports Lark-to-Codex conversations. The local session-management layer adds a practical remote control plane around long-running Windows Codex sessions. A user can leave Codex running on a workstation, inspect state from Lark Mobile or Lark Web, release or hand off a waiting Windows session, continue it from Lark, and later hand it back to Windows without losing the underlying Session ID.

@@ -11,6 +11,19 @@
 
 ---
 
+
+## Current session command model
+
+```text
+Lark Scope      → /lark status | /lark new | /lark resume
+Windows Runtime → /windows status | /windows release
+Global Sessions → /session list | /session use | /session handoff | /session handback
+```
+
+Legacy command names remain compatibility aliases, but this document uses the grouped names for project-level session management.
+
+---
+
 ## 1. Core Terms: Thread / Session / Turn / Item
 
 Different Codex surfaces use slightly different terminology:
@@ -56,6 +69,33 @@ Only one logical writer should own the Session at a time.
 ```
 
 That ownership layer is project-specific, not part of Codex's native persistence format.
+
+### Remote control surface: Lark Mobile App and Lark Web
+
+The local bridge now exposes Session management through interactive Lark cards, not only text commands. This is intended to make remote operation practical from both **Lark Mobile App** and **Lark Web**:
+
+```text
+/lark status
+→ current Lark scope + quick actions
+
+/windows status
+→ Windows runtime sessions + Release actions
+
+/session list
+→ global inventory + Use / Handoff / Hand Back actions
+```
+
+Action labels are human-readable, but execution remains Session-ID based:
+
+```text
+Display: unique Thread Name
+         duplicate Thread Name + short Session ID
+         short Session ID when unnamed
+
+Target:  exact full Session ID
+```
+
+Project name and cwd are metadata only and must not be used as action identities because several Sessions can share the same project directory. This distinction is especially important on mobile, where buttons replace long manual selectors. Lark Web/Desktop can additionally show `hover_tips`; mobile clients rely on the visible button text.
 
 ---
 
@@ -355,7 +395,7 @@ This project does not currently require the state DB, but newer Codex clients in
 Potential future uses:
 
 ```text
-high-performance /sessions
+high-performance /session list
 hundreds/thousands of Thread searches
 pagination
 filters by cwd/source/provider
@@ -835,9 +875,9 @@ state DB
 Future commands could expose:
 
 ```text
-/sessions active
-/sessions archived
-/sessions all
+/session list active
+/session list archived
+/session list all
 ```
 
 This project does not currently rely on archive metadata.
@@ -881,7 +921,7 @@ Active Writer
 Detached / Archived
 ```
 
-This explains why a visible Codex window may not immediately appear in `/sessions`.
+This explains why a visible Codex window may not immediately appear in `/session list`.
 
 ---
 
@@ -898,9 +938,9 @@ flowchart TD
     A --> L["launch mapping"]
     A --> RA["Watch-CodexRelease.ps1"]
 
-    S --> LS["/local-status"]
-    S --> INV["/sessions"]
-    L --> H["/local-handoff"]
+    S --> LS["/windows status"]
+    S --> INV["/session list"]
+    L --> H["/session handoff"]
     RA --> H
 ```
 
@@ -927,7 +967,7 @@ rollout + session_index
 
 to build a lightweight status projection.
 
-### `/sessions`
+### `/session list`
 
 Combines:
 
@@ -942,14 +982,14 @@ to present thread/project/owner/cwd information.
 
 ---
 
-## 29. Why `/sessions` Should Not Fully Replay Every Rollout
+## 29. Why `/session list` Should Not Fully Replay Every Rollout
 
 Large session rollouts can become very large.
 
 Bad architecture:
 
 ```text
-every /sessions call
+every /session list call
 → walk every session
 → parse every JSONL file from beginning to end
 ```
@@ -1191,9 +1231,9 @@ Before implementing a feature, ask:
 
 ### Project Documentation
 
-- [Third-Party Codex API Key](./01-codex-third-party-api-key.md)
-- [Lark / Bridge / Codex Architecture](./02-lark-bridge-codex-architecture.md)
-- [Root README](../README.md)
+- [Third-Party Codex API Key](./01-codex-third-party-api-key.en.md)
+- [Lark / Bridge / Codex Architecture](./02-lark-bridge-codex-architecture.en.md)
+- [Root README](../README.en.md)
 
 ---
 

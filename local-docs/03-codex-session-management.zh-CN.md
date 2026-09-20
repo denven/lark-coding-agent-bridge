@@ -11,6 +11,19 @@
 
 ---
 
+
+## 当前 Session 命令模型
+
+```text
+Lark Scope      → /lark status | /lark new | /lark resume
+Windows Runtime → /windows status | /windows release
+Global Sessions → /session list | /session use | /session handoff | /session handback
+```
+
+旧命令继续作为兼容 alias；本文在描述本项目 Session 管理时统一使用新的分组命令。
+
+---
+
 ## 1. 核心术语：Thread / Session / Turn / Item
 
 Codex 不同层使用的术语并不完全一致：
@@ -56,6 +69,33 @@ flowchart TD
 ```
 
 这不是 Codex 自身存储格式的一部分，而是本项目为安全 handoff 增加的约束。
+
+### 远程控制面：Lark Mobile App 与 Lark Web
+
+本地增强版现在不仅提供文本命令，也通过 Lark Interactive Card 暴露 Session 管理能力，目标是让 **Lark Mobile App** 和 **Lark Web** 都可以方便地进行远程操作：
+
+```text
+/lark status
+→ 当前 Lark scope + 快捷 Action
+
+/windows status
+→ Windows runtime Sessions + Release Action
+
+/session list
+→ 全局 inventory + Use / Handoff / Hand Back Action
+```
+
+Action 的显示名称与真正执行目标严格分开：
+
+```text
+显示：唯一 Thread Name
+      Thread Name 重名时 + short Session ID
+      没有 Thread Name 时使用 short Session ID
+
+执行：exact full Session ID
+```
+
+Project Name 和 cwd 只是辅助 metadata，不能作为 Action identity，因为多个 Session 完全可能共享同一个项目目录。这个规则在手机端尤其重要：用户看到的是可读按钮，不需要手工输入长 Session ID，而底层仍通过完整 Session ID 精确定位。Lark Web / Desktop 还可以显示 `hover_tips`；Mobile 主要依赖按钮本身的文字。
 
 ---
 
@@ -371,7 +411,7 @@ session_index.jsonl
 适合未来开发：
 
 ```text
-高性能 /sessions
+高性能 /session list
 几百 / 几千 Thread 搜索
 分页
 按 cwd / source / provider 筛选
@@ -883,12 +923,12 @@ state DB
 
 中体现。
 
-未来 `/sessions` 可扩展：
+未来 `/session list` 可扩展：
 
 ```text
-/sessions active
-/sessions archived
-/sessions all
+/session list active
+/session list archived
+/session list all
 ```
 
 本项目当前未将 archive 作为核心功能。
@@ -932,7 +972,7 @@ Active Writer
 Detached / Archived
 ```
 
-这解释了“Codex 窗口已经打开，但 `/sessions` 暂时没有”的情况。
+这解释了“Codex 窗口已经打开，但 `/session list` 暂时没有”的情况。
 
 ---
 
@@ -949,9 +989,9 @@ flowchart TD
     A --> L["launch mapping"]
     A --> RA["Watch-CodexRelease.ps1"]
 
-    S --> LS["/local-status"]
-    S --> INV["/sessions"]
-    L --> H["/local-handoff"]
+    S --> LS["/windows status"]
+    S --> INV["/session list"]
+    L --> H["/session handoff"]
     RA --> H
 ```
 
@@ -978,7 +1018,7 @@ rollout + session_index
 
 生成轻量 status projection。
 
-### `/sessions`
+### `/session list`
 
 聚合：
 
@@ -993,14 +1033,14 @@ Lark SessionStore
 
 ---
 
-## 29. 为什么不应让 `/sessions` 每次完整扫描全部 rollout
+## 29. 为什么不应让 `/session list` 每次完整扫描全部 rollout
 
 大 Session 的 rollout 会越来越大。
 
 错误架构：
 
 ```text
-每一次 /sessions
+每一次 /session list
 → 遍历全部 Session
 → 从头 parse 所有 JSONL
 ```
@@ -1264,9 +1304,9 @@ forensics
 
 ### 本项目相关文档
 
-- [Codex 第三方 API Key](./01-codex-third-party-api-key.zh-CN.md)
-- [Lark / Bridge / Codex 架构](./02-lark-bridge-codex-architecture.zh-CN.md)
-- [根 README](../README.zh-CN.md)
+- [Codex 第三方 API Key](./01-codex-third-party-api-key.md)
+- [Lark / Bridge / Codex 架构](./02-lark-bridge-codex-architecture.md)
+- [根 README](../README.md)
 
 ---
 
