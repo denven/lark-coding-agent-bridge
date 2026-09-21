@@ -241,11 +241,22 @@ function isSignedBridgeCallback(payload: Record<string, unknown>): boolean {
  * string the text-command handler expects: 'use proj-a'. Accepts `arg`
  * (preferred, generic) or `name` (legacy ws cards). */
 function composeArgs(sub: string, payload: Record<string, unknown>): string {
-  if (!sub) return '';
   const arg =
     (typeof payload.arg === 'string' && payload.arg) ||
     (typeof payload.name === 'string' && payload.name) ||
     '';
+
+  // Generic commands such as:
+  //   { cmd: 'local-release', arg: '<full-session-id>' }
+  //   { cmd: 'local-handoff', arg: '<full-session-id>' }
+  //   { cmd: 'use', arg: '<full-session-id>' }
+  // have no dot-subcommand, so the payload argument itself must be forwarded.
+  //
+  // Dotted commands such as:
+  //   { cmd: 'ws.use', name: 'proj-a' }
+  // still become "use proj-a".
+  if (!sub) return arg;
+
   return arg ? `${sub} ${arg}` : sub;
 }
 

@@ -13,6 +13,7 @@ import { handleLocalHandoff } from './local-handoff.js';
 import {
   handleLocalHandback,
   handleLocalSessions,
+  handleLocalTail,
   handleLocalUse,
 } from './local-session-manager.js';
 
@@ -460,6 +461,9 @@ async function handleSessionCommand(args: string, ctx: CommandContext): Promise<
     case 'handback':
       await handleLocalHandback(rest, ctx);
       return;
+    case 'tail':
+      await handleLocalTail(rest, ctx);
+      return;
     default:
       await reply(
         ctx,
@@ -470,6 +474,7 @@ async function handleSessionCommand(args: string, ctx: CommandContext): Promise<
           '• **/session use <selector>** — Detached Session → 当前 Lark scope',
           '• **/session handoff <selector>** — Windows → 当前 Lark scope',
           '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',
+          '• **/session tail [selector]** — 查看当前或指定 Session 的最后一条 Codex 可见回复',
           '',
           '兼容旧命令：**/sessions**、**/use**、**/local-handoff**、**/handback**',
         ].join('\n'),

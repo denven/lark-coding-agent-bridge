@@ -4,12 +4,14 @@ import {
   hydrateInventoryItem,
   isExistingDirectory,
   listLarkBindings,
+  markSessionDetached,
   mergeLarkBindings,
   resolveSessionSelector,
   type LarkBinding,
   type SessionInventoryItem,
 } from './local-session-state.js';
-import { actions, divMd, shell, type ButtonSpec } from '../card/templates.js';
+import { actions, divMd, divPlain, shell, type ButtonSpec } from '../card/templates.js';
+import { readLastCodexResponse } from '../session/codex-transcript.js';
 
 function clean(
   value: unknown,
@@ -392,26 +394,37 @@ function sessionActionButtons(
   const current = linked.some((binding) => binding.current);
   const target = sessionActionLabel(item, peers);
 
+  const buttons: ButtonSpec[] = [
+    {
+      text: '📜 Last Response',
+      value: {
+        cmd: 'session.tail',
+        // Always target the exact full Session ID.
+        arg: item.sessionId,
+      },
+      hoverTips: 'Show the most recent completed user-visible Codex response from this Session rollout.',
+    },
+  ];
+
   // A conflicting Windows + Lark ownership state should be inspected before
-  // any one-click transfer action is offered.
+  // any one-click transfer action is offered. Reading history remains safe.
   if (item.handoff.windowsActive && linked.length > 0) {
-    return [];
+    return buttons;
   }
 
   if (current) {
-    return [
-      {
-        text: `↩ Hand Back ${target}`,
-        value: { cmd: 'handback' },
-        style: 'primary',
-        hoverTips: 'Unbind the current Lark scope and make this Session ready to resume on Windows.',
-      },
-    ];
+    buttons.push({
+      text: `↩ Hand Back ${target}`,
+      value: { cmd: 'handback' },
+      style: 'primary',
+      hoverTips: 'Unbind the current Lark scope and make this Session Detached / ready to resume on Windows.',
+    });
+    return buttons;
   }
 
   // A Session bound to another Lark scope cannot be moved from this scope.
   if (linked.length > 0) {
-    return [];
+    return buttons;
   }
 
   if (item.handoff.windowsActive) {
@@ -419,35 +432,34 @@ function sessionActionButtons(
     // Ready and needs-validation states may still use the authoritative
     // PowerShell release chain in handleLocalHandoff().
     if (item.handoff.code === 'busy') {
-      return [];
+      return buttons;
     }
 
-    return [
-      {
-        text: `↪ Handoff ${target}`,
-        value: {
-          cmd: 'local-handoff',
-          // Always target the exact full Session ID; the label is display-only.
-          arg: item.sessionId,
-        },
-        style: 'primary',
-        hoverTips: 'Release the Windows writer and bind this Session to the current Lark scope.',
-      },
-    ];
-  }
-
-  return [
-    {
-      text: `▶ Use ${target}`,
+    buttons.push({
+      text: `↪ Handoff ${target}`,
       value: {
-        cmd: 'use',
+        cmd: 'local-handoff',
         // Always target the exact full Session ID; the label is display-only.
         arg: item.sessionId,
       },
       style: 'primary',
-      hoverTips: 'Bind this Detached Codex Session to the current Lark scope.',
+      hoverTips: 'Release the Windows writer and bind this Session to the current Lark scope.',
+    });
+    return buttons;
+  }
+
+  buttons.push({
+    text: `▶ Use ${target}`,
+    value: {
+      cmd: 'use',
+      // Always target the exact full Session ID; the label is display-only.
+      arg: item.sessionId,
     },
-  ];
+    style: 'primary',
+    hoverTips: 'Bind this Detached Codex Session to the current Lark scope.',
+  });
+
+  return buttons;
 }
 
 export async function handleLocalSessions(
@@ -553,6 +565,7 @@ export async function handleLocalSessions(
         '• **Use in this Lark** — Detached Session → current Lark scope',
         '• **Handoff to this Lark** — Windows → current Lark scope',
         '• **Hand Back to Windows** — current Lark scope → Detached / Windows-ready',
+        '• **Last Response** — read the latest completed user-visible Codex response',
         ...(!showAll && !keyword && items.length > candidates.length
           ? ['', 'Use **/session list all** to show more Session history.']
           : []),
@@ -561,6 +574,126 @@ export async function handleLocalSessions(
   );
 
   await replyCard(ctx, shell('🗂️ All Codex Sessions', elements));
+}
+
+function formatResponseTime(
+  value: number | undefined,
+): string | undefined {
+  if (value === undefined || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  try {
+    return new Date(value).toLocaleString(
+      'en-CA',
+      { hour12: false },
+    );
+  }
+  catch {
+    return undefined;
+  }
+}
+
+export async function handleLocalTail(
+  args: string,
+  ctx: any,
+): Promise<void> {
+  if (!isCodexContext(ctx)) {
+    await reply(ctx, '❌ **/session tail** is only available for the Codex agent.');
+    return;
+  }
+
+  const selector = args.trim();
+  const { items, bindings } = inventoryForContext(ctx);
+
+  let target: SessionInventoryItem | undefined;
+
+  if (selector) {
+    const resolved = resolveSessionSelector(selector, items);
+    if (!resolved.ok) {
+      await reply(ctx, targetResolveError(resolved.message));
+      return;
+    }
+    target = hydrateInventoryItem(resolved.item);
+  }
+  else {
+    const current = bindings.find((binding) => binding.current);
+    if (!current) {
+      await reply(
+        ctx,
+        [
+          'ℹ️ **The current Lark scope has no Codex Session binding.**',
+          '',
+          'Use **/session tail <Thread name | Session ID>** to inspect a specific Session.',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    const found = items.find((item) => item.sessionId === current.sessionId);
+    if (found) {
+      target = hydrateInventoryItem(found);
+    }
+  }
+
+  if (!target) {
+    await reply(ctx, '❌ The requested Codex Session could not be found in the inventory.');
+    return;
+  }
+
+  const rolloutPath = target.rolloutPath ?? target.status?.rolloutPath;
+  if (!rolloutPath) {
+    await reply(
+      ctx,
+      [
+        '⚠️ **No Codex rollout is available for this Session.**',
+        '',
+        `🔗 **Session:** ${clean(target.sessionId)}`,
+      ].join('\n'),
+    );
+    return;
+  }
+
+  const response = await readLastCodexResponse({
+    sessionId: target.sessionId,
+    rolloutPath,
+    maxChars: 5_000,
+  });
+
+  if (!response) {
+    await reply(
+      ctx,
+      [
+        'ℹ️ **No completed user-visible Codex response was found.**',
+        '',
+        `🏷 **Thread:** ${clean(sessionTitle(target))}`,
+        `🔗 **Session:** ${clean(target.sessionId)}`,
+      ].join('\n'),
+    );
+    return;
+  }
+
+  const time = formatResponseTime(response.timestampMs);
+  const elements: object[] = [
+    divMd(
+      [
+        `🏷 **Thread:** ${clean(sessionTitle(target))}`,
+        `🔗 **Session:** ${clean(target.sessionId)}`,
+        `👤 **Owner:** ${clean(ownerText(ctx, target, bindings))}`,
+        ...(time ? [`🕒 **Response time:** ${time}`] : []),
+      ].join('\n'),
+    ),
+    { tag: 'hr' },
+    divPlain(response.text),
+  ];
+
+  if (response.truncated) {
+    elements.push(
+      divMd('_The response was shortened for Lark display; the full text remains in the Codex rollout._'),
+    );
+  }
+
+  await replyCard(ctx, shell('📜 Last Codex Response', elements));
 }
 
 function targetResolveError(
@@ -982,6 +1115,12 @@ export async function handleLocalHandback(
    * It does NOT delete the underlying Codex
    * rollout/thread.
    */
+  const detachedRecorded =
+    markSessionDetached(
+      current.sessionId,
+      'handback',
+    );
+
   ctx.sessions.clear(
     ctx.scope,
   );
@@ -1027,8 +1166,17 @@ export async function handleLocalHandback(
   lines.push(
     '🔓 当前 Lark scope 已解除 Session 绑定。',
     '',
+    '👤 Owner: **Detached**（Windows-ready，但尚未由 Windows writer 接管）。',
+    '',
     'Codex Session 历史没有被删除。',
   );
+
+  if (!detachedRecorded) {
+    lines.push(
+      '',
+      '⚠️ Detached ownership marker could not be persisted; stale Windows telemetry may remain visible briefly.',
+    );
+  }
 
   if (cwd) {
     lines.push(

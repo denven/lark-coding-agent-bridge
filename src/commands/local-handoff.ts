@@ -8,11 +8,14 @@ import {
   buildSessionInventory,
   formatHandoffState,
   listLarkBindings,
+  markSessionDetached,
   mergeLarkBindings,
   resolveSessionSelector,
   type LocalStatus,
   type SessionInventoryItem,
 } from './local-session-state.js';
+import { actions, divMd, divPlain, shell } from '../card/templates.js';
+import { readLastCodexResponse } from '../session/codex-transcript.js';
 
 const execFileAsync =
   promisify(execFile);
@@ -78,6 +81,20 @@ async function reply(
     {
       markdown,
     },
+    {
+      replyTo:
+        ctx.msg.messageId,
+    },
+  );
+}
+
+async function replyCard(
+  ctx: any,
+  card: object,
+): Promise<void> {
+  await ctx.channel.send(
+    ctx.msg.chatId,
+    { card },
     {
       replyTo:
         ctx.msg.messageId,
@@ -951,6 +968,18 @@ export async function handleLocalHandoff(
   }
 
   /*
+   * Persist the ownership boundary immediately after the authoritative
+   * Windows release succeeds. A stale Observer heartbeat may remain fresh
+   * for a few seconds, but it must not reclaim Windows ownership. The marker
+   * is automatically superseded when a newer Windows launch mapping appears.
+   */
+  const detachedRecorded =
+    markSessionDetached(
+      release.sessionId,
+      'handoff-release',
+    );
+
+  /*
    * The Windows writer is now gone.
    *
    * The status JSON intentionally survives long
@@ -964,6 +993,21 @@ export async function handleLocalHandoff(
     await waitForStatus(
       release.sessionId,
     );
+
+  /*
+   * Read the last completed Windows-side response after release confirmation,
+   * when the rollout is no longer being written by the Windows writer. This
+   * is display-only continuity for the human; it is never re-injected into
+   * Codex because the resumed thread already contains the response.
+   */
+  const lastWindowsResponse =
+    await readLastCodexResponse({
+      sessionId: release.sessionId,
+      rolloutPath:
+        releasedStatus?.rolloutPath ??
+        target.rolloutPath,
+      maxChars: 5_000,
+    });
 
   const cwd =
     releasedStatus?.cwd ??
@@ -1102,47 +1146,85 @@ export async function handleLocalHandoff(
       ?.projectName ??
     target.projectName;
 
-  const lines: string[] = [
-    '✅ **Windows → Lark handoff completed**',
-    '',
-  ];
+  const summaryLines: string[] = [];
 
   if (threadName) {
-    lines.push(
-      `🏷 **Thread:** ${clean(
-        threadName,
-      )}`,
-      '',
+    summaryLines.push(
+      `🏷 **Thread:** ${clean(threadName)}`,
     );
   }
 
   if (projectName) {
-    lines.push(
-      `📁 **Project:** ${clean(
-        projectName,
-      )}`,
-      '',
+    summaryLines.push(
+      `📁 **Project:** ${clean(projectName)}`,
     );
   }
 
-  lines.push(
-    `🔗 **Session:** \`${clean(
-      release.sessionId,
-    )}\``,
+  summaryLines.push(
+    `🔗 **Session:** ${clean(release.sessionId)}`,
+    `📂 **Directory:** ${clean(cwd)}`,
+    '👤 **Owner:** Lark · Current',
+    '🖥 **Windows writer:** Released',
     '',
-    `📂 **Directory:** \`${clean(
-      cwd,
-    )}\``,
-    '',
-    '🖥 Windows Codex writer 已退出。',
-    '',
-    '🔄 当前 Lark scope 已绑定到该 Codex Session。',
-    '',
-    '**下一条普通消息将直接继续这个 Session。**',
+    '**Continue by sending a normal message in this Lark scope.**',
   );
 
-  await reply(
+  if (!detachedRecorded) {
+    summaryLines.push(
+      '',
+      '⚠️ Detached ownership marker could not be persisted; stale Windows telemetry may remain visible briefly.',
+    );
+  }
+
+  const elements: object[] = [
+    divMd(summaryLines.join('\n')),
+  ];
+
+  if (lastWindowsResponse) {
+    elements.push(
+      { tag: 'hr' },
+      divMd('**💬 Last Windows Response**'),
+      divPlain(lastWindowsResponse.text),
+    );
+
+    if (lastWindowsResponse.truncated) {
+      elements.push(
+        divMd('_The response was shortened for Lark display; the full text remains in the Codex rollout._'),
+      );
+    }
+  }
+  else {
+    elements.push(
+      { tag: 'hr' },
+      divMd('💬 **Last Windows Response:** no completed user-visible response was found in the rollout.'),
+    );
+  }
+
+  elements.push(
+    { tag: 'hr' },
+    actions([
+      {
+        text: '📜 Last Response',
+        value: {
+          cmd: 'session.tail',
+          arg: release.sessionId,
+        },
+        hoverTips: 'Read the latest completed user-visible Codex response for this Session.',
+      },
+      {
+        text: '↩ Hand Back',
+        value: { cmd: 'handback' },
+        style: 'primary',
+        hoverTips: 'Unbind this Session from the current Lark scope and make it Detached / Windows-ready.',
+      },
+    ]),
+  );
+
+  await replyCard(
     ctx,
-    lines.join('\n'),
+    shell(
+      '✅ Session Handoff Completed',
+      elements,
+    ),
   );
 }

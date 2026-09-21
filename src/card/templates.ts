@@ -27,6 +27,10 @@ export function divMd(content: string): object {
   return { tag: 'div', text: { tag: 'lark_md', content } };
 }
 
+export function divPlain(content: string): object {
+  return { tag: 'div', text: { tag: 'plain_text', content } };
+}
+
 export function actions(buttons: ButtonSpec[]): object {
   return { tag: 'action', actions: buttons.map(button) };
 }
@@ -236,6 +240,7 @@ export function helpCard(agentName = 'Agent'): object {
         '• **/session use <selector>** — Detached Session → 当前 Lark scope',
         '• **/session handoff <selector>** — Windows → 当前 Lark scope',
         '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',
+        '• **/session tail [selector]** — 查看当前或指定 Session 的最后一条 Codex 可见回复',
         '',
         '兼容旧命令：**/sessions**、**/use**、**/local-handoff**、**/handback**',
         '',

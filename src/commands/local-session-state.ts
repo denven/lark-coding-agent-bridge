@@ -1,11 +1,13 @@
 import {
   closeSync,
   existsSync,
+  mkdirSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -87,6 +89,24 @@ export interface LaunchMapping {
   releaseAgentPid?: number;
 
   attachedAt?: string;
+}
+
+export interface DetachedMarker {
+  version: 1;
+
+  sessionId: string;
+  detachedAt: string;
+  reason?: string;
+}
+
+interface DetachedMarkerRecord {
+  marker: DetachedMarker;
+  time: number;
+}
+
+interface LaunchMappingRecord {
+  launch: LaunchMapping;
+  time: number;
 }
 
 export type HandoffCode =
@@ -362,6 +382,102 @@ export function readMonitorStatuses():
   return result;
 }
 
+function safeSessionFileName(
+  sessionId: string,
+): string {
+  return sessionId.replace(
+    /[^A-Za-z0-9._-]/g,
+    '_',
+  );
+}
+
+function detachedMarkerPath(
+  sessionId: string,
+): string {
+  return join(
+    MONITOR_HOME,
+    'detached',
+    `${safeSessionFileName(sessionId)}.json`,
+  );
+}
+
+function readDetachedMarkerRecord(
+  sessionId: string,
+): DetachedMarkerRecord | undefined {
+  const path = detachedMarkerPath(sessionId);
+  const marker = readJsonFile<DetachedMarker>(path);
+
+  if (
+    !marker ||
+    marker.sessionId !== sessionId ||
+    typeof marker.detachedAt !== 'string'
+  ) {
+    return undefined;
+  }
+
+  const parsed = toTime(marker.detachedAt);
+  let time = parsed;
+
+  if (time <= 0) {
+    try {
+      time = statSync(path).mtimeMs;
+    }
+    catch {
+      time = 0;
+    }
+  }
+
+  return { marker, time };
+}
+
+/**
+ * Persist explicit evidence that no Windows writer currently owns this
+ * Session. The marker remains valid until a newer Windows launch mapping is
+ * created by Attach-CodexObserver.ps1. This prevents a stale/fresh-for-a-few-
+ * seconds Observer heartbeat from incorrectly re-claiming Windows ownership
+ * after handoff or handback.
+ */
+export function markSessionDetached(
+  sessionId: string,
+  reason = 'detached',
+): boolean {
+  const dir = join(
+    MONITOR_HOME,
+    'detached',
+  );
+
+  const path = detachedMarkerPath(sessionId);
+
+  const marker: DetachedMarker = {
+    version: 1,
+    sessionId,
+    detachedAt: new Date().toISOString(),
+    reason,
+  };
+
+  try {
+    mkdirSync(
+      dir,
+      { recursive: true },
+    );
+
+    writeFileSync(
+      path,
+      JSON.stringify(
+        marker,
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    return true;
+  }
+  catch {
+    return false;
+  }
+}
+
 function launchTimestamp(
   path: string,
   launch: LaunchMapping,
@@ -385,9 +501,9 @@ function launchTimestamp(
   }
 }
 
-export function getLatestLaunchMapping(
+function getLatestLaunchMappingRecord(
   sessionId: string,
-): LaunchMapping | undefined {
+): LaunchMappingRecord | undefined {
   const dir =
     join(
       MONITOR_HOME,
@@ -411,10 +527,8 @@ export function getLatestLaunchMapping(
   }
 
   let selected:
-    | LaunchMapping
+    | LaunchMappingRecord
     | undefined;
-
-  let selectedTime = 0;
 
   for (const name of names) {
     if (
@@ -452,25 +566,54 @@ export function getLatestLaunchMapping(
 
     if (
       !selected ||
-      time >= selectedTime
+      time >= selected.time
     ) {
-      selected =
-        launch;
-
-      selectedTime =
-        time;
+      selected = {
+        launch,
+        time,
+      };
     }
   }
 
   return selected;
 }
 
+export function getLatestLaunchMapping(
+  sessionId: string,
+): LaunchMapping | undefined {
+  return getLatestLaunchMappingRecord(
+    sessionId,
+  )?.launch;
+}
+
 export function getHandoffState(
   status: LocalStatus,
 ): HandoffState {
-  const launch =
-    getLatestLaunchMapping(
+  const launchRecord =
+    getLatestLaunchMappingRecord(
       status.sessionId,
+    );
+
+  const launch =
+    launchRecord?.launch;
+
+  const detachedRecord =
+    readDetachedMarkerRecord(
+      status.sessionId,
+    );
+
+  /*
+   * An explicit detached marker is authoritative until a newer Windows
+   * launch exists. This is the durable ownership boundary used by handoff
+   * and handback. Observer heartbeat alone is telemetry and must not reclaim
+   * ownership after the corresponding Windows writer was released.
+   */
+  const explicitlyDetached =
+    detachedRecord !== undefined &&
+    (
+      !launchRecord ||
+      detachedRecord.time >=
+        launchRecord.time
     );
 
   const observerPid =
@@ -527,8 +670,11 @@ export function getHandoffState(
    * writerAlive is retained as a fallback.
    */
   const windowsActive =
-    observerFresh ||
-    writerAlive;
+    !explicitlyDetached &&
+    (
+      observerFresh ||
+      writerAlive
+    );
 
   if (!windowsActive) {
     return {
@@ -540,6 +686,12 @@ export function getHandoffState(
       observerAlive,
       writerAlive,
       releaseAgentAlive,
+
+      reason:
+        explicitlyDetached
+          ? detachedRecord?.marker.reason ??
+            'Explicitly detached'
+          : undefined,
 
       launch,
     };
