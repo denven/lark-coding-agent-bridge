@@ -470,7 +470,7 @@ async function handleSessionCommand(args: string, ctx: CommandContext): Promise<
         [
           '🗂️ **All Codex Sessions**',
           '',
-          '• **/session list [all|keyword]** — 查看全部 Session、Owner 与状态',
+          '• **/session list [handoff|use|handback|all|keyword]** — 查看 Session、Owner 与状态；默认按可 Handoff 分类，卡片顶部可切换',
           '• **/session use <selector>** — Detached Session → 当前 Lark scope',
           '• **/session handoff <selector>** — Windows → 当前 Lark scope',
           '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',

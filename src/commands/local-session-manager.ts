@@ -11,7 +11,21 @@ import {
   type SessionInventoryItem,
 } from './local-session-state.js';
 import { actions, divMd, divPlain, shell, type ButtonSpec } from '../card/templates.js';
+import { log } from '../core/logger.js';
 import { readLastCodexResponse } from '../session/codex-transcript.js';
+
+/**
+ * Which one-click ownership transfer a Session currently offers. The list card
+ * groups Sessions by this so the default view only shows rows that can act.
+ */
+type SessionCategory = 'handoff' | 'use' | 'handback' | 'none';
+
+const SESSION_FILTERS = ['handoff', 'use', 'handback', 'all'] as const;
+
+type SessionFilter = (typeof SESSION_FILTERS)[number];
+
+/** How many Sessions the category tabs are allowed to draw from. */
+const SESSION_FILTER_POOL = 20;
 
 function clean(
   value: unknown,
@@ -384,6 +398,68 @@ function inventoryForContext(
   };
 }
 
+/*
+ * Mirror of the decision tree in sessionActionButtons(). Kept as a separate
+ * pure function so the category tabs and the per-row buttons cannot disagree:
+ * a Session listed under "Handoff" is exactly one that renders a Handoff
+ * button. Any change to one must be made in the other.
+ */
+function sessionCategory(
+  item: SessionInventoryItem,
+  bindings: LarkBinding[],
+): SessionCategory {
+  const linked = bindingsFor(item, bindings);
+  const current = linked.some((binding) => binding.current);
+
+  // Conflicting Windows + Lark ownership: inspect before transferring.
+  if (item.handoff.windowsActive && linked.length > 0) {
+    return 'none';
+  }
+
+  if (current) {
+    return 'handback';
+  }
+
+  // Bound to another Lark scope — not movable from here.
+  if (linked.length > 0) {
+    return 'none';
+  }
+
+  if (item.handoff.windowsActive) {
+    return item.handoff.code === 'busy' ? 'none' : 'handoff';
+  }
+
+  return 'use';
+}
+
+function filterTabButtons(
+  counts: Record<SessionFilter, number>,
+  active: SessionFilter,
+): ButtonSpec[] {
+  const labels: Record<SessionFilter, string> = {
+    handoff: '↪ Handoff',
+    use: '▶ Use',
+    handback: '↩ Hand Back',
+    all: '🗂 All',
+  };
+
+  const hints: Record<SessionFilter, string> = {
+    handoff: 'Show only Sessions that can be handed off from Windows to this Lark scope.',
+    use: 'Show only Detached Sessions that can be bound to this Lark scope.',
+    handback: 'Show only Sessions bound to this Lark scope that can be handed back to Windows.',
+    all: 'Show every Session, including ones with no available transfer action.',
+  };
+
+  return SESSION_FILTERS.map((filter) => ({
+    // The active tab is marked in the label because Lark gives no
+    // selected-state styling for buttons inside an action row.
+    text: `${filter === active ? '● ' : ''}${labels[filter]} (${counts[filter]})`,
+    value: { cmd: 'session.list', arg: filter },
+    style: filter === active ? 'primary' : 'default',
+    hoverTips: hints[filter],
+  }));
+}
+
 function sessionActionButtons(
   ctx: any,
   item: SessionInventoryItem,
@@ -472,54 +548,87 @@ export async function handleLocalSessions(
   }
 
   const input = args.trim();
-  const showAll = input.toLowerCase() === 'all';
-  const keyword = showAll ? '' : input.toLowerCase();
+  const lowered = input.toLowerCase();
+  const asFilter = SESSION_FILTERS.find((filter) => filter === lowered);
+  // A bare filter word selects a category tab; anything else is a keyword search.
+  const keyword = asFilter ? '' : lowered;
   const { items, bindings } = inventoryForContext(ctx);
 
-  let candidates = items;
+  let candidates: SessionInventoryItem[];
+  let counts: Record<SessionFilter, number> | undefined;
+  let activeFilter: SessionFilter | undefined;
 
   if (keyword) {
-    candidates = items.filter(
-      (item) =>
-        item.sessionId.toLowerCase().includes(keyword) ||
-        item.threadName?.toLowerCase().includes(keyword) ||
-        item.projectName?.toLowerCase().includes(keyword),
-    );
-  }
-  else if (!showAll) {
-    // Default view: all currently-owned sessions + a small recent detached history.
-    const important = items.filter(
-      (item) => item.handoff.windowsActive || bindingsFor(item, bindings).length > 0,
-    );
-    const detached = items
+    candidates = items
       .filter(
-        (item) => !item.handoff.windowsActive && bindingsFor(item, bindings).length === 0,
+        (item) =>
+          item.sessionId.toLowerCase().includes(keyword) ||
+          item.threadName?.toLowerCase().includes(keyword) ||
+          item.projectName?.toLowerCase().includes(keyword),
       )
-      .slice(0, 10);
+      .slice(0, 30);
+  } else {
+    /*
+     * Category tabs replace the old "recent history" heuristic. Only the most
+     * recent SESSION_FILTER_POOL Sessions participate, so the counts on the
+     * tabs always describe exactly what the tabs can show.
+     */
+    const pool = items.slice(0, SESSION_FILTER_POOL);
+    const byCategory = new Map<SessionCategory, SessionInventoryItem[]>();
+    for (const item of pool) {
+      const category = sessionCategory(item, bindings);
+      const bucket = byCategory.get(category);
+      if (bucket) bucket.push(item);
+      else byCategory.set(category, [item]);
+    }
 
-    candidates = [...important, ...detached];
-    const seen = new Set<string>();
-    candidates = candidates.filter((item) => {
-      if (seen.has(item.sessionId)) return false;
-      seen.add(item.sessionId);
-      return true;
-    });
+    counts = {
+      handoff: byCategory.get('handoff')?.length ?? 0,
+      use: byCategory.get('use')?.length ?? 0,
+      handback: byCategory.get('handback')?.length ?? 0,
+      all: pool.length,
+    };
+
+    /*
+     * Default to Handoff because that is the state needing a decision. When it
+     * is empty, fall through to the next non-empty category rather than opening
+     * on a blank card.
+     */
+    activeFilter =
+      asFilter ??
+      (['handoff', 'handback', 'use'] as const).find((filter) => counts![filter] > 0) ??
+      'all';
+
+    candidates =
+      activeFilter === 'all' ? pool : (byCategory.get(activeFilter) ?? []);
   }
 
-  const limit = showAll ? 30 : 20;
-  candidates = candidates.slice(0, limit).map(hydrateInventoryItem);
+  candidates = candidates.map(hydrateInventoryItem);
 
-  if (candidates.length === 0) {
-    await reply(
-      ctx,
-      keyword
-        ? `No Codex Session matched **${clean(input)}**.`
-        : 'No Codex Sessions were found.',
-    );
+  if (candidates.length === 0 && keyword) {
+    await reply(ctx, `No Codex Session matched **${clean(input)}**.`);
+    return;
+  }
+
+  if (counts?.all === 0) {
+    await reply(ctx, 'No Codex Sessions were found.');
     return;
   }
 
   const elements: object[] = [];
+
+  if (counts && activeFilter) {
+    elements.push(actions(filterTabButtons(counts, activeFilter)));
+    elements.push({ tag: 'hr' });
+  }
+
+  if (candidates.length === 0) {
+    elements.push(
+      divMd(
+        `No Session in the most recent ${SESSION_FILTER_POOL} currently offers this action. Pick another category above.`,
+      ),
+    );
+  }
 
   for (const [idx, item] of candidates.entries()) {
     const linked = bindingsFor(item, bindings);
@@ -566,14 +675,56 @@ export async function handleLocalSessions(
         '• **Handoff to this Lark** — Windows → current Lark scope',
         '• **Hand Back to Windows** — current Lark scope → Detached / Windows-ready',
         '• **Last Response** — read the latest completed user-visible Codex response',
-        ...(!showAll && !keyword && items.length > candidates.length
-          ? ['', 'Use **/session list all** to show more Session history.']
+        ...(counts && items.length > counts.all
+          ? [
+              '',
+              `Showing the most recent ${SESSION_FILTER_POOL} of ${items.length} Sessions. Use **/session list <keyword>** to find an older one.`,
+            ]
           : []),
       ].join('\n'),
     ),
   );
 
-  await replyCard(ctx, shell('🗂️ All Codex Sessions', elements));
+  const card = shell('🗂️ All Codex Sessions', elements);
+
+  /*
+   * A tab click re-runs this handler with ctx.msg.messageId set to the card's
+   * own message (see makeFakeMsg in card/dispatcher.ts). Recall that card and
+   * post the replacement, which is the same pattern the /account and /config
+   * card flows use.
+   *
+   * Two rejected alternatives, both of which fail silently:
+   *   - channel.updateCard() → im.v1.message.patch. Feishu answers HTTP 200
+   *     with a non-zero body code and the SDK discards the response, so a
+   *     refused patch throws nothing and renders nothing.
+   *   - sendManagedCard() → cardkit.card.create, which rejects the v1 schema
+   *     that shell() builds ("returned no card_id").
+   *
+   * Cost of recall-and-resend: the card moves to the bottom of the chat on each
+   * tab switch instead of updating where it sits.
+   */
+  if (ctx.fromCardAction && ctx.msg.messageId) {
+    /*
+     * Send first, recall second. The replacement is sent as a reply to the old
+     * card because that is the only way to land in the right topic thread
+     * (SendOptions has no threadId — only replyTo/replyInThread), and recalling
+     * a parent message in Feishu does not remove replies already made to it.
+     */
+    const stale = ctx.msg.messageId;
+    await replyCard(ctx, card);
+
+    try {
+      await ctx.channel.recallMessage(stale);
+    } catch (err) {
+      // Leaves the old card above the new one — visible, not silent.
+      log.warn('command', 'session-list-recall-failed', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return;
+  }
+
+  await replyCard(ctx, card);
 }
 
 function formatResponseTime(

@@ -1031,6 +1031,17 @@ Lark SessionStore
 
 显示 owner / project / thread / cwd。
 
+卡片顶部提供分类切换（取最近 20 个 Session）：
+
+```text
+● ↪ Handoff (n)   ▶ Use (n)   ↩ Hand Back (n)   🗂 All (n)
+```
+
+分类与每行按钮同源（`sessionCategory()` 镜像 `sessionActionButtons()`），
+因此列在 Handoff 下的 Session 一定会渲染 Handoff 按钮。默认打开可 Handoff
+分类；若为空则依次回退到 Hand Back / Use / All。点击分类按钮会就地更新同一
+张卡片，不会堆叠新卡片。更早的 Session 用 `/session list <keyword>` 查找。
+
 ---
 
 ## 29. 为什么不应让 `/session list` 每次完整扫描全部 rollout
