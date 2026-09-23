@@ -94,8 +94,11 @@ describe('README runtime contract', () => {
 });
 
 async function readDocs(): Promise<string> {
+  // This fork's README.md documents the Windows session extensions; the
+  // upstream user docs this contract covers are kept as README.upstream.md
+  // (English) and README.zh.md (Chinese).
   const [en, zh] = await Promise.all([
-    readFile(new URL('../../../README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../../../README.upstream.md', import.meta.url), 'utf8'),
     readFile(new URL('../../../README.zh.md', import.meta.url), 'utf8'),
   ]);
   return `${en}\n${zh}`;

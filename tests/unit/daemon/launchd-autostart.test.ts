@@ -9,6 +9,13 @@ vi.mock('node:child_process', async (importOriginal) => ({
   spawnSync: mocks.spawnSync,
 }));
 
+// forcePlatform('darwin') alone is not enough off macOS: launchd domains are
+// built from os.userInfo().uid, which is -1 on Windows. Give it a real uid.
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, userInfo: () => ({ ...actual.userInfo(), uid: 501, gid: 20 }) };
+});
+
 const { getServiceAdapter } = await import('../../../src/daemon/service-adapter');
 const { launchAgentLabel } = await import('../../../src/daemon/paths');
 

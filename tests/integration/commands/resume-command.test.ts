@@ -244,7 +244,7 @@ describe('agent-aware resume commands', () => {
     await expect(h.run('/status')).resolves.toBe(true);
     let status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain('**session**');
-    expect(status).toContain('未建立');
+    expect(status).toContain('not established');
     expect(status).not.toContain('**thread**');
     expect(status).not.toContain('**conversation**');
 
@@ -254,7 +254,7 @@ describe('agent-aware resume commands', () => {
     status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain('**session**');
     expect(status).toContain('thread-c');
-    expect(status).not.toContain('未建立');
+    expect(status).not.toContain('not established');
   });
 
   it('does not list local history from home when no workspace is bound', async () => {

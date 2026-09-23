@@ -44,7 +44,7 @@ describe('/status and /doctor diagnostics', () => {
     release();
     expect(h.agent.runOptions).toHaveLength(1);
     const status = JSON.stringify(lastContent(h.channel));
-    expect(status).toContain('旧 cwd');
+    expect(status).toContain('stale cwd');
     expect(status).toContain('active run');
     expect(status).toContain('active scopes');
     expect(status).toContain('1/1 active');

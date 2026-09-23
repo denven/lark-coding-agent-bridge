@@ -226,9 +226,9 @@ describe('Bridge command contracts', () => {
     expect(h.agent.runOptions).toHaveLength(0);
     const status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain('Fake Agent');
-    expect(status).toContain('工作目录');
+    expect(status).toContain('📂 Workspace');
     expect(status).toContain('**session**');
-    expect(status).toContain('(无)');
+    expect(status).toContain('(none)');
     expect(status).not.toContain('**conversation**');
     expect(status).toContain('permission');
     expect(status).toContain('plan');
