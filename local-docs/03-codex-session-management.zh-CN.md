@@ -1031,7 +1031,7 @@ Lark SessionStore
 
 显示 owner / project / thread / cwd。
 
-卡片顶部提供分类切换（取最近 20 个 Session）：
+卡片顶部提供分类切换（取最近 10 个 Session）：
 
 ```text
 ● ↪ Handoff (n)   ▶ Use (n)   ↩ Hand Back (n)   🗂 All (n)

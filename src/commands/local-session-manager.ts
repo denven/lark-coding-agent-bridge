@@ -25,7 +25,7 @@ const SESSION_FILTERS = ['handoff', 'use', 'handback', 'all'] as const;
 type SessionFilter = (typeof SESSION_FILTERS)[number];
 
 /** How many Sessions the category tabs are allowed to draw from. */
-const SESSION_FILTER_POOL = 20;
+const SESSION_FILTER_POOL = 10;
 
 function clean(
   value: unknown,
