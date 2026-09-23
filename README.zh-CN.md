@@ -1,8 +1,8 @@
-# lark-channel-bridge — Windows Codex Session 远程管理扩展
+# lark-channel-bridge — 面向 Codex 与 Claude Code 的 Windows Session 远程管理扩展
 
 [English](./README.md) | **简体中文**
 
-> 本仓库是在上游 **`lark-channel-bridge`** 基础上维护的 Windows / Codex 增强版本，重点增加本地 Codex CLI Session 的发现与监控、Windows 与 Lark 之间的安全 ownership transfer，以及通过 Lark Mobile App / Lark Web 远程管理多个 Codex Session 的能力。
+> 本仓库是在上游 **`lark-channel-bridge`** 基础上维护的 Windows 增强版本，重点增加本地 **Codex CLI** 与 **Claude Code** Session 的发现与监控、Windows 与 Lark 之间的安全 ownership transfer，以及通过 Lark Mobile App / Lark Web 远程管理多个 Session 的能力。
 
 ## 上游项目 — `lark-channel-bridge`
 
@@ -20,7 +20,7 @@
 
 ## 本 fork 新增了什么
 
-上游 bridge 已经能够让一个 Lark Chat / Group / Topic 与本地 Coding Agent 交互。本 fork 进一步增加了一个面向 Windows 的 **Codex Session 控制层**，用于管理那些直接在 Windows Terminal 中启动、并不一定由当前 Lark scope 创建的 Codex Session。
+上游 bridge 已经能够让一个 Lark Chat / Group / Topic 与本地 Coding Agent 交互。本 fork 进一步增加了一个面向 Windows 的 **Session 控制层**，用于管理那些直接在 Windows Terminal 中启动、并不一定由当前 Lark scope 创建的 Codex 与 Claude Code Session。每个 bot 管理其 profile 所运行的 agent，两者使用相同的 `/session` 命令，见 [Claude Code 会话](#claude-code-会话)。
 
 | 能力 | 上游 `lark-channel-bridge` | 本 fork 新增 |
 |---|---|---|
@@ -28,9 +28,9 @@
 | Chat / Topic 独立 Session | 上游核心能力 | 保留 |
 | Workspace 切换与保存 | 上游核心能力 | 保留 |
 | Streaming / Interactive Card | 上游核心能力 | 增加 Session 控制 Action |
-| 独立从 Windows 启动的 Codex Session | 不是原 Lark scope 模型的主要关注点 | 自动发现与监控 |
-| Windows Runtime 视图 | — | `/windows status` |
-| 安全释放 Windows writer | — | `/windows release` + Release Agent |
+| 独立从 Windows 启动的 Codex / Claude Code Session | 不是原 Lark scope 模型的主要关注点 | 自动发现与监控 |
+| Windows Runtime 视图（Codex） | — | `/windows status` |
+| 安全释放 Windows writer（Codex） | — | `/windows release` + Release Agent |
 | 跨运行时 Session inventory | — | `/session list` |
 | Detached Session → 当前 Lark scope | — | `/session use` |
 | Windows → Lark ownership transfer | — | `/session handoff` |
@@ -42,7 +42,7 @@
 
 ### 为什么增加这些能力
 
-一个典型场景是在 Windows 工作站中直接启动多个 Codex CLI Session，然后离开电脑。新增的 Observer、Monitor、Release 和 Ownership 层可以把这些已经存在的 Session 暴露给 Lark：
+一个典型场景是在 Windows 工作站中直接启动多个 Codex CLI 或 Claude Code Session，然后离开电脑。新增的监控、Release 和 Ownership 层可以把这些已经存在的 Session 暴露给 Lark。Codex 的链路如下（Claude Code 自带进程登记，不需要 Observer，见 [Claude Code 会话](#claude-code-会话)）：
 
 ```text
 Windows Terminal / codex3
@@ -66,14 +66,14 @@ Windows Terminal / codex3
 
 这样无需连接 Remote Desktop，就可以从 Lark 查看 Windows Session、release Waiting 状态的 Windows writer、把 Session handoff 到当前 Lark scope、接管 Detached Session，并在之后 handback 给 Windows。
 
-## 从 Lark 远程管理 Codex Session
+## 从 Lark 远程管理 Session
 
 Session 命令和 UI 统一分为三层：
 
 | 范围 | 推荐命令 | 含义 |
 |---|---|---|
 | Lark Scope | `/lark status`, `/lark new`, `/lark resume` | 当前 Lark Chat / Group / Topic 的 Session binding |
-| Windows Runtime | `/windows status`, `/windows release` | Windows Codex TUI、Observer、Release Agent、writer |
+| Windows Runtime（仅 Codex） | `/windows status`, `/windows release` | Windows Codex TUI、Observer、Release Agent、writer |
 | Global Session Manager | `/session list`, `/session use`, `/session handoff`, `/session handback` | 跨 Windows / Lark 的 Session inventory 与 ownership transfer |
 
 Interactive Card 针对手机端操作做了进一步优化：
@@ -98,6 +98,23 @@ Thread Name
 因此 Project Name 和 cwd 仍可以显示为辅助信息，但不会再作为 Action 的 Session 身份，因为同一个 Project / cwd 下可以同时存在多个不同 Session。
 
 `/session list` 打开时显示分类标签 **Handoff / Use / Hand Back / All**，取最近 10 个 Session，默认打开第一个非空分类。每个分类下列出的，正好是会显示该操作按钮的 Session。更早的 Session 用 `/session list <关键字>` 查找。
+
+### Screenshots
+
+<table>
+<tr>
+<td align="center"><strong>Lark Scope</strong></td>
+<td align="center"><strong>Windows Runtime</strong></td>
+<td align="center"><strong>All Codex Sessions</strong></td>
+</tr>
+<tr>
+<td><img src="./screenshots/lark-session-status.png" alt="Lark Session Status" width="100%"></td>
+<td><img src="./screenshots/windows-codex-sessions.png" alt="Windows Codex Sessions" width="100%"></td>
+<td><img src="./screenshots/all-codex-sessions.png" alt="All Codex Sessions" width="100%"></td>
+</tr>
+</table>
+
+这样可以直接在手机 Lark 或 Lark Web 中查看 Session、释放 Windows writer、把 Windows Session handoff 到当前 Lark、接管 Detached Session，或者再 handback 给 Windows，同时保持明确的单 Writer 语义。
 
 ## Claude Code 会话
 
@@ -144,23 +161,6 @@ Codex 不需要这一步，是因为 `codex3` 在它所在的管理员终端里�
 ```
 
 没有代理时，管理员权限的 Claude 窗口会显示 **Running as administrator — Claude release agent not running**，不提供 Handoff 按钮。从普通终端启动的 Claude 窗口不需要代理也能接管。
-
-### Screenshots
-
-<table>
-<tr>
-<td align="center"><strong>Lark Scope</strong></td>
-<td align="center"><strong>Windows Runtime</strong></td>
-<td align="center"><strong>All Codex Sessions</strong></td>
-</tr>
-<tr>
-<td><img src="./screenshots/lark-session-status.png" alt="Lark Session Status" width="100%"></td>
-<td><img src="./screenshots/windows-codex-sessions.png" alt="Windows Codex Sessions" width="100%"></td>
-<td><img src="./screenshots/all-codex-sessions.png" alt="All Codex Sessions" width="100%"></td>
-</tr>
-</table>
-
-这样可以直接在手机 Lark 或 Lark Web 中查看 Session、释放 Windows writer、把 Windows Session handoff 到当前 Lark、接管 Detached Session，或者再 handback 给 Windows，同时保持明确的单 Writer 语义。
 
 ## 兼容旧命令
 
@@ -229,10 +229,16 @@ codex3 resume <Session-ID>
 
 在 Windows 中执行即可继续同一个 Codex Session。
 
+Claude Code 的流程相同，在 Claude bot 的群里进行：在 Windows 上启动 `claude`，然后用 `/session list` / `/session handoff`（没有 `/windows` 这一步）。handback 之后在 Windows 上这样续接：
+
+```powershell
+claude --resume <Session-ID>
+```
+
 ## Ownership model
 
 ```text
-同一个 Codex Session
+同一个 Session（Codex 或 Claude Code）
        │
        ├── Windows writer
        ├── Lark scope
@@ -276,8 +282,14 @@ pnpm build
 npm install -g .
 .\scripts\windows\Install-CodexBridgeScripts.ps1
 
+# 如果以管理员身份启动 Claude，在管理员 PowerShell 中执行一次：
+.\scripts\windows\Register-ClaudeReleaseAgent.ps1
+
+# 重启正在使用的每个 profile：
 lark-channel-bridge stop --profile codex
 lark-channel-bridge start --profile codex
+lark-channel-bridge stop --profile claude
+lark-channel-bridge start --profile claude
 ```
 
 不要使用 `npm install -g lark-channel-bridge@latest` 覆盖本地增强版，否则本地 Session 管理功能会被上游 registry 包替换。
@@ -287,7 +299,7 @@ lark-channel-bridge start --profile codex
 - [本地文档索引](./local-docs/README.zh-CN.md)
 - [Codex 第三方 API Provider](./local-docs/01-codex-third-party-api-key.zh-CN.md)
 - [Lark / Bridge / Codex 架构](./local-docs/02-lark-bridge-codex-architecture.zh-CN.md)
-- [Codex Session 管理](./local-docs/03-codex-session-management.zh-CN.md)
+- [Codex / Claude Code Session 管理](./local-docs/03-codex-session-management.zh-CN.md)
 
 ## 上游与致谢
 

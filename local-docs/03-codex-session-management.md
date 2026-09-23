@@ -1,4 +1,4 @@
-# Codex Session / Thread Management and Local Storage Reference
+# Codex / Claude Code Session Management and Local Storage Reference
 
 **English** | [简体中文](./03-codex-session-management.zh-CN.md)
 
@@ -8,6 +8,8 @@
 >
 > - **Project observations** from Windows + Codex CLI 0.155.x with an isolated `CODEX_HOME`.
 > - **Public Codex implementation/documentation** from OpenAI's Codex docs and the `openai/codex` repository. Internal storage formats can evolve and should not be treated as permanent public APIs.
+>
+> Most of the document is the Codex reference. The Claude Code side — its transcripts and process registry, the Claude Release Agent, and how both agents bind to a Lark scope — is covered under `/session list` in section 28.
 
 ---
 
@@ -16,7 +18,7 @@
 
 ```text
 Lark Scope      → /lark status | /lark new | /lark resume
-Windows Runtime → /windows status | /windows release
+Windows Runtime → /windows status | /windows release   (Codex only)
 Global Sessions → /session list | /session use | /session handoff | /session handback
 ```
 

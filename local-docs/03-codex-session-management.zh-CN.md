@@ -1,4 +1,4 @@
-# Codex Session / Thread 管理机制与本地存储参考
+# Codex / Claude Code Session 管理机制与本地存储参考
 
 [English](./03-codex-session-management.md) | **简体中文**
 
@@ -8,6 +8,8 @@
 >
 > - **本项目实测**：主要基于 Windows + Codex CLI 0.155.x、独立 `CODEX_HOME` 的 rollout/status 调试结果。
 > - **Codex 公开实现 / 文档**：基于 OpenAI Codex 官方文档和 `openai/codex` 开源代码。内部持久化格式会演进，因此不要把内部字段视为永久稳定 API。
+>
+> 本文主体是 Codex 参考。Claude Code 部分（transcript 与进程登记、Claude Release Agent，以及两种 agent 如何绑定到 Lark scope）在第 28 节 `/session list` 之下。
 
 ---
 
@@ -16,7 +18,7 @@
 
 ```text
 Lark Scope      → /lark status | /lark new | /lark resume
-Windows Runtime → /windows status | /windows release
+Windows Runtime → /windows status | /windows release   （仅 Codex）
 Global Sessions → /session list | /session use | /session handoff | /session handback
 ```
 

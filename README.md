@@ -1,8 +1,8 @@
-# lark-channel-bridge — Windows Codex Session Remote Management Extension
+# lark-channel-bridge — Windows Session Remote Management Extension for Codex and Claude Code
 
 **English** | [简体中文](./README.zh-CN.md)
 
-> A Windows-focused downstream extension of **`lark-channel-bridge`** for discovering and monitoring local Codex CLI sessions, safely transferring session ownership between Windows and Lark, and remotely managing multiple Codex sessions from Lark Mobile App or Lark Web.
+> A Windows-focused downstream extension of **`lark-channel-bridge`** for discovering and monitoring local **Codex CLI** and **Claude Code** sessions, safely transferring session ownership between Windows and Lark, and remotely managing multiple sessions from Lark Mobile App or Lark Web.
 
 ## Upstream project — `lark-channel-bridge`
 
@@ -20,7 +20,7 @@ This fork intentionally keeps the upstream project prominent in the documentatio
 
 ## What this fork adds
 
-The upstream bridge already lets a Lark Chat / Group / Topic interact with a local coding agent. This fork adds a Windows-focused **Codex Session control plane** for Codex sessions that may have been started independently in Windows Terminal rather than created only through the current Lark scope.
+The upstream bridge already lets a Lark Chat / Group / Topic interact with a local coding agent. This fork adds a Windows-focused **Session control plane** for Codex and Claude Code sessions that may have been started independently in Windows Terminal rather than created only through the current Lark scope. Each bot manages the agent its profile runs, with the same `/session` commands for both — see [Claude Code sessions](#claude-code-sessions).
 
 | Area | Upstream `lark-channel-bridge` | This fork adds |
 |---|---|---|
@@ -28,9 +28,9 @@ The upstream bridge already lets a Lark Chat / Group / Topic interact with a loc
 | Per-chat/topic session continuity | Core upstream feature | Preserved |
 | Workspace switching and saved workspaces | Core upstream feature | Preserved |
 | Streaming and interactive cards | Core upstream feature | Extended with session-control actions |
-| Windows Codex sessions started independently of Lark | Not the focus of the original Lark scope model | Automatic local discovery and monitoring |
-| Windows runtime view | — | `/windows status` |
-| Safe Windows writer release | — | `/windows release` with Release Agent |
+| Windows Codex / Claude Code sessions started independently of Lark | Not the focus of the original Lark scope model | Automatic local discovery and monitoring |
+| Windows runtime view (Codex) | — | `/windows status` |
+| Safe Windows writer release (Codex) | — | `/windows release` with Release Agent |
 | Cross-runtime session inventory | — | `/session list` |
 | Detached Session → current Lark scope | — | `/session use` |
 | Windows → Lark ownership transfer | — | `/session handoff` |
@@ -42,7 +42,7 @@ The upstream bridge already lets a Lark Chat / Group / Topic interact with a loc
 
 ### Why these extensions exist
 
-A common workflow is to start several Codex CLI sessions directly on a Windows workstation and later leave the computer. The additional Observer, monitor, release, and ownership layers let Lark become a remote control surface for those existing sessions:
+A common workflow is to start several Codex CLI or Claude Code sessions directly on a Windows workstation and later leave the computer. The additional monitoring, release, and ownership layers let Lark become a remote control surface for those existing sessions. For Codex the path looks like this (Claude Code needs no Observer — it keeps its own process registry; see [Claude Code sessions](#claude-code-sessions)):
 
 ```text
 Windows Terminal / codex3
@@ -66,14 +66,14 @@ Windows Terminal / codex3
 
 From Lark you can inspect Windows sessions, safely release a waiting Windows writer, hand a session to the current Lark scope, use a detached session, and hand the current Lark-owned session back to Windows without requiring Remote Desktop.
 
-## Remote Codex session management from Lark
+## Remote session management from Lark
 
 The UI follows the same three-layer model as the command set:
 
 | Scope | Recommended commands | Meaning |
 |---|---|---|
 | Lark Scope | `/lark status`, `/lark new`, `/lark resume` | Current Lark Chat / Group / Topic binding |
-| Windows Runtime | `/windows status`, `/windows release` | Windows Codex TUI, Observer, Release Agent, writer |
+| Windows Runtime (Codex only) | `/windows status`, `/windows release` | Windows Codex TUI, Observer, Release Agent, writer |
 | Global Session Manager | `/session list`, `/session use`, `/session handoff`, `/session handback` | Cross-runtime inventory and ownership transfer |
 
 The interactive cards are especially useful on a phone:
@@ -98,6 +98,23 @@ ALWAYS the exact full Session ID
 Project names and working directories are shown as metadata, but are **not** used as the identity of an action because several sessions can share the same project or cwd.
 
 `/session list` opens on category tabs — **Handoff**, **Use**, **Hand Back**, **All** — drawn from the 10 most recent Sessions, defaulting to the first category that has a Session in it. Each tab lists exactly the Sessions that render that action's button. Use `/session list <keyword>` to find an older Session.
+
+### Screenshots
+
+<table>
+<tr>
+<td align="center"><strong>Lark scope</strong></td>
+<td align="center"><strong>Windows runtime</strong></td>
+<td align="center"><strong>All Codex sessions</strong></td>
+</tr>
+<tr>
+<td><img src="./screenshots/lark-session-status.png" alt="Lark Session Status" width="100%"></td>
+<td><img src="./screenshots/windows-codex-sessions.png" alt="Windows Codex Sessions" width="100%"></td>
+<td><img src="./screenshots/all-codex-sessions.png" alt="All Codex Sessions" width="100%"></td>
+</tr>
+</table>
+
+This makes it possible to inspect and switch Codex ownership remotely from Lark Mobile or Lark Web while keeping the Windows/Lark single-writer rule explicit.
 
 ## Claude Code sessions
 
@@ -144,23 +161,6 @@ Codex does not need this step because `codex3` starts its Release Agent from the
 ```
 
 Without the agent, elevated Claude windows are shown as **Running as administrator — Claude release agent not running** and offer no Handoff button. Claude windows started from a normal terminal can be handed off without it.
-
-### Screenshots
-
-<table>
-<tr>
-<td align="center"><strong>Lark scope</strong></td>
-<td align="center"><strong>Windows runtime</strong></td>
-<td align="center"><strong>All Codex sessions</strong></td>
-</tr>
-<tr>
-<td><img src="./screenshots/lark-session-status.png" alt="Lark Session Status" width="100%"></td>
-<td><img src="./screenshots/windows-codex-sessions.png" alt="Windows Codex Sessions" width="100%"></td>
-<td><img src="./screenshots/all-codex-sessions.png" alt="All Codex Sessions" width="100%"></td>
-</tr>
-</table>
-
-This makes it possible to inspect and switch Codex ownership remotely from Lark Mobile or Lark Web while keeping the Windows/Lark single-writer rule explicit.
 
 ## Compatibility aliases
 
@@ -221,10 +221,16 @@ Then resume it on Windows with the command returned by the bridge:
 codex3 resume <Session-ID>
 ```
 
+With Claude Code the flow is the same, in the Claude bot's group: start `claude` on Windows, then use `/session list` / `/session handoff` (there is no `/windows` step), and resume on Windows after a handback with:
+
+```powershell
+claude --resume <Session-ID>
+```
+
 ## Ownership model
 
 ```text
-One Codex Session
+One Session (Codex or Claude Code)
        │
        ├── Windows writer
        ├── Lark scope
@@ -268,8 +274,14 @@ pnpm build
 npm install -g .
 .\scripts\windows\Install-CodexBridgeScripts.ps1
 
+# Once, from an elevated PowerShell, if you start Claude as administrator:
+.\scripts\windows\Register-ClaudeReleaseAgent.ps1
+
+# Restart each profile you run:
 lark-channel-bridge stop --profile codex
 lark-channel-bridge start --profile codex
+lark-channel-bridge stop --profile claude
+lark-channel-bridge start --profile claude
 ```
 
 Do not replace the local build with `npm install -g lark-channel-bridge@latest`; that installs the upstream registry package and removes the local session-management extensions.
@@ -279,7 +291,7 @@ Do not replace the local build with `npm install -g lark-channel-bridge@latest`;
 - [Local documentation index](./local-docs/README.md)
 - [Third-party Codex API provider setup](./local-docs/01-codex-third-party-api-key.md)
 - [Lark / Bridge / Codex architecture](./local-docs/02-lark-bridge-codex-architecture.md)
-- [Codex session management](./local-docs/03-codex-session-management.md)
+- [Codex / Claude Code session management](./local-docs/03-codex-session-management.md)
 
 ## Upstream and attribution
 
