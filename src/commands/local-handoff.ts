@@ -16,6 +16,9 @@ import {
 } from './local-session-state.js';
 import { actions, divMd, divPlain, shell } from '../card/templates.js';
 import { readLastCodexResponse } from '../session/codex-transcript.js';
+import { bindScopeToSession } from './session-binding.js';
+import { handleClaudeHandoff } from './claude-handoff.js';
+import { scopeProvider, withoutAgentTokens } from './session-provider.js';
 
 const execFileAsync =
   promisify(execFile);
@@ -626,32 +629,22 @@ function currentScopeBinding(
   )?.sessionId;
 }
 
-async function flushStores(
-  ctx: any,
-): Promise<void> {
-  if (
-    typeof ctx.workspaces
-      ?.flush ===
-    'function'
-  ) {
-    await ctx.workspaces.flush();
-  }
-
-  if (
-    typeof ctx.sessions
-      ?.flush ===
-    'function'
-  ) {
-    await ctx.sessions.flush();
-  }
-}
-
 export async function handleLocalHandoff(
   args: string,
   ctx: any,
 ): Promise<void> {
+  /*
+   * Handoff always lands in this scope's own agent: the released Session must
+   * be one this scope's adapter can resume. The profile decides which agent,
+   * so the command is identical on a Codex and a Claude bot.
+   */
   const selector =
-    args.trim();
+    withoutAgentTokens(args, { leadingOnly: true });
+
+  if (scopeProvider(ctx).agentKind === 'claude') {
+    await handleClaudeHandoff(selector, ctx);
+    return;
+  }
 
   if (!selector) {
     await reply(
@@ -1071,29 +1064,23 @@ export async function handleLocalHandoff(
    * they own the same Session.
    */
   try {
-    ctx.workspaces.setCwd(
-      ctx.scope,
-      cwd,
-    );
-
     /*
-     * Local bridge variants have used both
-     * 3-argument and 4-argument SessionStore.set().
-     *
-     * Calling through `any` keeps this custom fork
-     * compatible while preserving the Codex agent
-     * id when the fourth argument is supported.
+     * Writes the session catalog as well as sessions.json: Codex resumes only
+     * from the catalog, so a sessions.json-only binding would make the next
+     * message start a fresh thread instead of continuing this one.
      */
-    (ctx.sessions as any).set(
-      ctx.scope,
+    const bound = await bindScopeToSession(
+      ctx,
+      'codex',
       release.sessionId,
       cwd,
-      ctx.agent?.id,
     );
 
-    await flushStores(
-      ctx,
-    );
+    if (!bound.catalogBound) {
+      throw new Error(
+        'Session catalog unavailable; Codex cannot resume this thread from Lark',
+      );
+    }
   }
   catch (error: unknown) {
     /*

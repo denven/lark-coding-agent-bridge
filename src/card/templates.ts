@@ -208,39 +208,57 @@ export function resumeCard(cwd: string, entries: ResumeEntry[]): object {
   return shell('🔁 恢复历史会话', elements);
 }
 
-export function helpCard(agentName = 'Agent'): object {
+export interface HelpCardOptions {
+  /** Whose Sessions the control-plane commands manage, e.g. "Codex". */
+  sessionLabel?: string;
+  /**
+   * Whether /windows applies. It drives the Codex Observer / Release Agent,
+   * which a Claude Code profile does not have.
+   */
+  windowsRuntime?: boolean;
+}
+
+export function helpCard(
+  agentName = 'Agent',
+  { sessionLabel = 'Codex', windowsRuntime = true }: HelpCardOptions = {},
+): object {
   const escapedAgentName = escapeMd(agentName);
+  const label = escapeMd(sessionLabel);
   return shell('💡 使用帮助', [
     divMd(
       [
         '**💬 Lark Session**',
         '',
-        '当前 Lark Chat / Group / Topic 与 Codex Session 的绑定。',
+        `当前 Lark Chat / Group / Topic 与 ${label} Session 的绑定。`,
         '',
-        '• **/lark status** — 查看当前 Lark scope 绑定的 Codex Session',
+        `• **/lark status** — 查看当前 Lark scope 绑定的 ${label} Session`,
         '• **/lark new [chat [name]]** — 清除当前绑定并新建 Session；也可创建新群',
         '• **/lark resume [N]** — 查看并恢复当前 Lark scope 的历史 Session',
         '',
         '兼容旧命令：**/status**、**/new**、**/reset**、**/resume**',
         '',
-        '**🖥️ Windows Codex**',
-        '',
-        'Windows Terminal 中由本地 Observer / Release Agent 管理的 Codex Session。',
-        '',
-        '• **/windows status [all|selector]** — 查看全部或指定 Windows Codex Session',
-        '• **/windows release <selector>** — 释放 Waiting 状态的 Windows Codex writer',
-        '',
-        '兼容旧命令：**/local-status**、**/local-release**',
-        '',
-        '**🗂️ All Codex Sessions**',
+        ...(windowsRuntime
+          ? [
+              '**🖥️ Windows Codex**',
+              '',
+              'Windows Terminal 中由本地 Observer / Release Agent 管理的 Codex Session。',
+              '',
+              '• **/windows status [all|selector]** — 查看全部或指定 Windows Codex Session',
+              '• **/windows release <selector>** — 释放 Waiting 状态的 Windows Codex writer',
+              '',
+              '兼容旧命令：**/local-status**、**/local-release**',
+              '',
+            ]
+          : []),
+        `**🗂️ All ${label} Sessions**`,
         '',
         '跨 Windows 与 Lark 的全局 Session inventory 和 ownership 管理。',
         '',
-        '• **/session list [all|keyword]** — 查看 Codex Sessions、Owner 与状态',
+        `• **/session list [handoff|use|handback|all|keyword]** — 查看 ${label} Sessions、Owner 与状态`,
         '• **/session use <selector>** — Detached Session → 当前 Lark scope',
         '• **/session handoff <selector>** — Windows → 当前 Lark scope',
         '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',
-        '• **/session tail [selector]** — 查看当前或指定 Session 的最后一条 Codex 可见回复',
+        `• **/session tail [selector]** — 查看当前或指定 Session 的最后一条 ${label} 可见回复`,
         '',
         '兼容旧命令：**/sessions**、**/use**、**/local-handoff**、**/handback**',
         '',
@@ -272,7 +290,7 @@ export function helpCard(agentName = 'Agent'): object {
         text: '💬 Lark Status',
         value: { cmd: 'status' },
         style: 'primary',
-        hoverTips: '查看当前 Lark Chat / Group / Topic 绑定的 Codex Session',
+        hoverTips: `查看当前 Lark Chat / Group / Topic 绑定的 ${sessionLabel} Session`,
       },
       {
         text: '🔁 Lark Resume',

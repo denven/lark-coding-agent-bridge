@@ -127,6 +127,13 @@ export interface HandoffState {
 
   reason?: string;
 
+  /**
+   * False when no one-click Windows → Lark transfer can succeed, so the card
+   * offers neither a Handoff tab entry nor a button. Undefined means the
+   * release step itself decides (Codex's needs-validation relies on that).
+   */
+  transferable?: boolean;
+
   launch?: LaunchMapping;
 }
 
@@ -263,15 +270,25 @@ function statusUpdatedAt(
   );
 }
 
-export function isProcessAlive(
+/**
+ * 'denied' means the process exists but this process may not open it — on
+ * Windows, a non-elevated bridge probing an elevated (Run as administrator)
+ * process gets EPERM. It must never be read as "gone".
+ */
+export type ProcessState =
+  | 'alive'
+  | 'denied'
+  | 'gone';
+
+export function processState(
   pid: unknown,
-): boolean {
+): ProcessState {
   if (
     typeof pid !== 'number' ||
     !Number.isInteger(pid) ||
     pid <= 0
   ) {
-    return false;
+    return 'gone';
   }
 
   try {
@@ -280,11 +297,19 @@ export function isProcessAlive(
       0,
     );
 
-    return true;
+    return 'alive';
   }
-  catch {
-    return false;
+  catch (error: unknown) {
+    return (error as NodeJS.ErrnoException)?.code === 'EPERM'
+      ? 'denied'
+      : 'gone';
   }
+}
+
+export function isProcessAlive(
+  pid: unknown,
+): boolean {
+  return processState(pid) !== 'gone';
 }
 
 export function isFreshTimestamp(

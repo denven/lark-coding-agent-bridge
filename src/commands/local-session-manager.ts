@@ -1,7 +1,5 @@
 import {
-  buildSessionInventory,
   formatHandoffState,
-  hydrateInventoryItem,
   isExistingDirectory,
   listLarkBindings,
   markSessionDetached,
@@ -12,7 +10,12 @@ import {
 } from './local-session-state.js';
 import { actions, divMd, divPlain, shell, type ButtonSpec } from '../card/templates.js';
 import { log } from '../core/logger.js';
-import { readLastCodexResponse } from '../session/codex-transcript.js';
+import {
+  scopeProvider,
+  withoutAgentTokens,
+  type SessionProvider,
+} from './session-provider.js';
+import { bindScopeToSession, unbindScope } from './session-binding.js';
 
 /**
  * Which one-click ownership transfer a Session currently offers. The list card
@@ -74,19 +77,6 @@ async function replyCard(
     ctx.msg.chatId,
     { card },
     commandReplyOptions(ctx),
-  );
-}
-
-function isCodexContext(
-  ctx: any,
-): boolean {
-  return (
-    ctx.agent?.id ===
-      'codex' ||
-    ctx.controls
-      ?.profileConfig
-      ?.agentKind ===
-      'codex'
   );
 }
 
@@ -344,8 +334,13 @@ function inventoryForContext(
   items: SessionInventoryItem[];
   bindings: LarkBinding[];
 } {
+  /*
+   * Always the scope's own agent: bindings (sessions.json is per profile) and
+   * inventory then describe the same kind of Session, so merging them cannot
+   * produce rows for an agent this profile does not drive.
+   */
   const inventory =
-    buildSessionInventory();
+    scopeProvider(ctx).buildInventory();
 
   const bindings =
     listLarkBindings(
@@ -407,6 +402,7 @@ function inventoryForContext(
 function sessionCategory(
   item: SessionInventoryItem,
   bindings: LarkBinding[],
+  provider: SessionProvider,
 ): SessionCategory {
   const linked = bindingsFor(item, bindings);
   const current = linked.some((binding) => binding.current);
@@ -426,6 +422,7 @@ function sessionCategory(
   }
 
   if (item.handoff.windowsActive) {
+    if (!provider.supportsHandoff || item.handoff.transferable === false) return 'none';
     return item.handoff.code === 'busy' ? 'none' : 'handoff';
   }
 
@@ -460,27 +457,30 @@ function filterTabButtons(
   }));
 }
 
+function lastResponseButton(
+  item: SessionInventoryItem,
+  provider: SessionProvider,
+): ButtonSpec {
+  return {
+    text: '📜 Last Response',
+    // Always target the exact full Session ID.
+    value: { cmd: 'session.tail', arg: item.sessionId },
+    hoverTips: `Show the most recent completed user-visible ${provider.label} response from this Session.`,
+  };
+}
+
 function sessionActionButtons(
   ctx: any,
   item: SessionInventoryItem,
   bindings: LarkBinding[],
   peers: SessionInventoryItem[],
+  provider: SessionProvider,
 ): ButtonSpec[] {
   const linked = bindingsFor(item, bindings);
   const current = linked.some((binding) => binding.current);
   const target = sessionActionLabel(item, peers);
 
-  const buttons: ButtonSpec[] = [
-    {
-      text: '📜 Last Response',
-      value: {
-        cmd: 'session.tail',
-        // Always target the exact full Session ID.
-        arg: item.sessionId,
-      },
-      hoverTips: 'Show the most recent completed user-visible Codex response from this Session rollout.',
-    },
-  ];
+  const buttons: ButtonSpec[] = [lastResponseButton(item, provider)];
 
   // A conflicting Windows + Lark ownership state should be inspected before
   // any one-click transfer action is offered. Reading history remains safe.
@@ -507,7 +507,11 @@ function sessionActionButtons(
     // Busy Windows sessions are intentionally not given a transfer button.
     // Ready and needs-validation states may still use the authoritative
     // PowerShell release chain in handleLocalHandoff().
-    if (item.handoff.code === 'busy') {
+    if (
+      item.handoff.code === 'busy' ||
+      item.handoff.transferable === false ||
+      !provider.supportsHandoff
+    ) {
       return buttons;
     }
 
@@ -542,16 +546,29 @@ export async function handleLocalSessions(
   args: string,
   ctx: any,
 ): Promise<void> {
-  if (!isCodexContext(ctx)) {
-    await reply(ctx, '❌ **/session list** is only available for the Codex agent.');
-    return;
+  const provider = scopeProvider(ctx);
+
+  /*
+   * A category word picks the tab and anything else is a keyword search, in
+   * any order. Agent words (`codex` / `claude`) are dropped: the profile
+   * decides the agent, so the command reads the same on every bot.
+   */
+  let asFilter: SessionFilter | undefined;
+  const keywordParts: string[] = [];
+
+  for (const token of withoutAgentTokens(args).split(/\s+/).filter(Boolean)) {
+    const lowered = token.toLowerCase();
+    const filter = SESSION_FILTERS.find((value) => value === lowered);
+    if (filter && !asFilter) {
+      asFilter = filter;
+      continue;
+    }
+
+    keywordParts.push(lowered);
   }
 
-  const input = args.trim();
-  const lowered = input.toLowerCase();
-  const asFilter = SESSION_FILTERS.find((filter) => filter === lowered);
-  // A bare filter word selects a category tab; anything else is a keyword search.
-  const keyword = asFilter ? '' : lowered;
+  const keyword = keywordParts.join(' ');
+
   const { items, bindings } = inventoryForContext(ctx);
 
   let candidates: SessionInventoryItem[];
@@ -576,7 +593,7 @@ export async function handleLocalSessions(
     const pool = items.slice(0, SESSION_FILTER_POOL);
     const byCategory = new Map<SessionCategory, SessionInventoryItem[]>();
     for (const item of pool) {
-      const category = sessionCategory(item, bindings);
+      const category = sessionCategory(item, bindings, provider);
       const bucket = byCategory.get(category);
       if (bucket) bucket.push(item);
       else byCategory.set(category, [item]);
@@ -603,15 +620,15 @@ export async function handleLocalSessions(
       activeFilter === 'all' ? pool : (byCategory.get(activeFilter) ?? []);
   }
 
-  candidates = candidates.map(hydrateInventoryItem);
+  candidates = candidates.map((item) => provider.hydrate(item));
 
   if (candidates.length === 0 && keyword) {
-    await reply(ctx, `No Codex Session matched **${clean(input)}**.`);
+    await reply(ctx, `No ${provider.label} Session matched **${clean(keyword)}**.`);
     return;
   }
 
   if (counts?.all === 0) {
-    await reply(ctx, 'No Codex Sessions were found.');
+    await reply(ctx, `No ${provider.label} Sessions were found.`);
     return;
   }
 
@@ -656,7 +673,7 @@ export async function handleLocalSessions(
     lines.push(`🕒 ${formatUpdated(item.updatedAtMs)}`);
     elements.push(divMd(lines.join('\n')));
 
-    const buttons = sessionActionButtons(ctx, item, bindings, candidates);
+    const buttons = sessionActionButtons(ctx, item, bindings, candidates, provider);
     if (buttons.length > 0) {
       elements.push(actions(buttons));
     }
@@ -666,26 +683,31 @@ export async function handleLocalSessions(
     }
   }
 
+  const olderHint =
+    counts && items.length > counts.all
+      ? [
+          '',
+          `Showing the most recent ${SESSION_FILTER_POOL} of ${items.length} Sessions. Use **/session list <keyword>** to find an older one.`,
+        ]
+      : [];
+
   elements.push({ tag: 'hr' });
   elements.push(
     divMd(
       [
         '**Session actions**',
         '• **Use in this Lark** — Detached Session → current Lark scope',
-        '• **Handoff to this Lark** — Windows → current Lark scope',
+        provider.supportsHandoff
+          ? '• **Handoff to this Lark** — Windows → current Lark scope'
+          : `• **Handoff** — not available for ${provider.label} yet; quit the Windows window first, then Use`,
         '• **Hand Back to Windows** — current Lark scope → Detached / Windows-ready',
-        '• **Last Response** — read the latest completed user-visible Codex response',
-        ...(counts && items.length > counts.all
-          ? [
-              '',
-              `Showing the most recent ${SESSION_FILTER_POOL} of ${items.length} Sessions. Use **/session list <keyword>** to find an older one.`,
-            ]
-          : []),
+        `• **Last Response** — read the latest completed user-visible ${provider.label} response`,
+        ...olderHint,
       ].join('\n'),
     ),
   );
 
-  const card = shell('🗂️ All Codex Sessions', elements);
+  const card = shell(`🗂️ All ${provider.label} Sessions`, elements);
 
   /*
    * A tab click re-runs this handler with ctx.msg.messageId set to the card's
@@ -749,12 +771,9 @@ export async function handleLocalTail(
   args: string,
   ctx: any,
 ): Promise<void> {
-  if (!isCodexContext(ctx)) {
-    await reply(ctx, '❌ **/session tail** is only available for the Codex agent.');
-    return;
-  }
+  const provider = scopeProvider(ctx);
+  const selector = withoutAgentTokens(args, { leadingOnly: true });
 
-  const selector = args.trim();
   const { items, bindings } = inventoryForContext(ctx);
 
   let target: SessionInventoryItem | undefined;
@@ -765,7 +784,7 @@ export async function handleLocalTail(
       await reply(ctx, targetResolveError(resolved.message));
       return;
     }
-    target = hydrateInventoryItem(resolved.item);
+    target = provider.hydrate(resolved.item);
   }
   else {
     const current = bindings.find((binding) => binding.current);
@@ -773,7 +792,7 @@ export async function handleLocalTail(
       await reply(
         ctx,
         [
-          'ℹ️ **The current Lark scope has no Codex Session binding.**',
+          `ℹ️ **The current Lark scope has no ${provider.label} Session binding.**`,
           '',
           'Use **/session tail <Thread name | Session ID>** to inspect a specific Session.',
         ].join('\n'),
@@ -783,21 +802,20 @@ export async function handleLocalTail(
 
     const found = items.find((item) => item.sessionId === current.sessionId);
     if (found) {
-      target = hydrateInventoryItem(found);
+      target = provider.hydrate(found);
     }
   }
 
   if (!target) {
-    await reply(ctx, '❌ The requested Codex Session could not be found in the inventory.');
+    await reply(ctx, `❌ The requested ${provider.label} Session could not be found in the inventory.`);
     return;
   }
 
-  const rolloutPath = target.rolloutPath ?? target.status?.rolloutPath;
-  if (!rolloutPath) {
+  if (!target.rolloutPath && !target.status?.rolloutPath) {
     await reply(
       ctx,
       [
-        '⚠️ **No Codex rollout is available for this Session.**',
+        `⚠️ **No ${provider.label} transcript is available for this Session.**`,
         '',
         `🔗 **Session:** ${clean(target.sessionId)}`,
       ].join('\n'),
@@ -805,17 +823,13 @@ export async function handleLocalTail(
     return;
   }
 
-  const response = await readLastCodexResponse({
-    sessionId: target.sessionId,
-    rolloutPath,
-    maxChars: 5_000,
-  });
+  const response = await provider.readLastResponse(target, 5_000);
 
   if (!response) {
     await reply(
       ctx,
       [
-        'ℹ️ **No completed user-visible Codex response was found.**',
+        `ℹ️ **No completed user-visible ${provider.label} response was found.**`,
         '',
         `🏷 **Thread:** ${clean(sessionTitle(target))}`,
         `🔗 **Session:** ${clean(target.sessionId)}`,
@@ -840,11 +854,11 @@ export async function handleLocalTail(
 
   if (response.truncated) {
     elements.push(
-      divMd('_The response was shortened for Lark display; the full text remains in the Codex rollout._'),
+      divMd(`_The response was shortened for Lark display; the full text remains in the ${provider.label} transcript._`),
     );
   }
 
-  await replyCard(ctx, shell('📜 Last Codex Response', elements));
+  await replyCard(ctx, shell(`📜 Last ${provider.label} Response`, elements));
 }
 
 function targetResolveError(
@@ -859,45 +873,13 @@ function targetResolveError(
   ].join('\n');
 }
 
-async function flushStores(
-  ctx: any,
-): Promise<void> {
-  if (
-    typeof ctx.workspaces
-      ?.flush ===
-    'function'
-  ) {
-    await ctx.workspaces.flush();
-  }
-
-  if (
-    typeof ctx.sessions
-      ?.flush ===
-    'function'
-  ) {
-    await ctx.sessions.flush();
-  }
-}
-
 export async function handleLocalUse(
   args: string,
   ctx: any,
 ): Promise<void> {
-  if (
-    !isCodexContext(
-      ctx,
-    )
-  ) {
-    await reply(
-      ctx,
-      '❌ **/session use** 仅适用于 Codex agent。',
-    );
-
-    return;
-  }
-
-  const selector =
-    args.trim();
+  // Binding is always into the scope's own agent — see bindScopeToSession().
+  const provider = scopeProvider(ctx);
+  const selector = withoutAgentTokens(args, { leadingOnly: true });
 
   if (!selector) {
     await reply(
@@ -959,7 +941,7 @@ export async function handleLocalUse(
   }
 
   let target =
-    hydrateInventoryItem(
+    provider.hydrate(
       resolved.item,
     );
 
@@ -1108,27 +1090,19 @@ export async function handleLocalUse(
    * it never releases a Windows writer.
    * It only binds an already Detached Session.
    */
-  ctx.workspaces.setCwd(
-    ctx.scope,
-    target.cwd,
-  );
-
-  /*
-   * Some local bridge versions accept an
-   * optional fourth agent id argument.
-   * Calling through any keeps compatibility
-   * with both signatures.
-   */
-  (ctx.sessions as any).set(
-    ctx.scope,
+  const bound = await bindScopeToSession(
+    ctx,
+    provider.agentKind,
     target.sessionId,
     target.cwd,
-    ctx.agent?.id,
   );
 
-  await flushStores(
-    ctx,
-  );
+  if (!bound.catalogBound) {
+    log.warn('command', 'session-use-no-catalog', {
+      agent: provider.agentKind,
+      scope: ctx.scope,
+    });
+  }
 
   await reply(
     ctx,
@@ -1149,7 +1123,12 @@ export async function handleLocalUse(
         target.cwd,
       )}\``,
       '',
-      '**下一条普通消息将继续这个 Session。**',
+      ...(bound.catalogBound || provider.agentKind === 'claude'
+        ? ['**下一条普通消息将继续这个 Session。**']
+        : [
+            // Codex resumes only from the session catalog (run-flow.ts).
+            '⚠️ **Session catalog 不可用，Codex 无法续接这个 Session；下一条消息会开启新 thread。**',
+          ]),
     ].join('\n'),
   );
 }
@@ -1167,18 +1146,8 @@ export async function handleLocalHandback(
   _args: string,
   ctx: any,
 ): Promise<void> {
-  if (
-    !isCodexContext(
-      ctx,
-    )
-  ) {
-    await reply(
-      ctx,
-      '❌ **/session handback** 仅适用于 Codex agent。',
-    );
-
-    return;
-  }
+  // A scope only ever binds its own agent's Sessions, so handback is too.
+  const provider = scopeProvider(ctx);
 
   if (
     hasActiveRun(
@@ -1188,7 +1157,7 @@ export async function handleLocalHandback(
     await reply(
       ctx,
       [
-        '⛔ **当前 Codex 任务仍在运行。**',
+        `⛔ **当前 ${provider.label} 任务仍在运行。**`,
         '',
         '为了避免在任务执行过程中交回控制权，handback 已取消。',
         '',
@@ -1216,7 +1185,7 @@ export async function handleLocalHandback(
     await reply(
       ctx,
       [
-        'ℹ️ 当前 Lark scope 没有绑定 Codex Session。',
+        `ℹ️ 当前 Lark scope 没有绑定 ${provider.label} Session。`,
         '',
         '无需 handback。',
       ].join('\n'),
@@ -1226,7 +1195,7 @@ export async function handleLocalHandback(
   }
 
   const inventory =
-    buildSessionInventory();
+    provider.buildInventory();
 
   mergeLarkBindings(
     inventory.items,
@@ -1242,7 +1211,7 @@ export async function handleLocalHandback(
 
   const hydrated =
     item
-      ? hydrateInventoryItem(
+      ? provider.hydrate(
           item,
         )
       : undefined;
@@ -1263,26 +1232,22 @@ export async function handleLocalHandback(
    *
    * stop considering this Lark scope the owner.
    *
-   * It does NOT delete the underlying Codex
-   * rollout/thread.
+   * It does NOT delete the underlying
+   * transcript / thread.
+   *
+   * The Codex detached marker suppresses stale Observer telemetry. Claude has
+   * no Observer: its ownership comes from the live process registry, which is
+   * already PID-checked, so there is nothing stale to suppress.
    */
   const detachedRecorded =
-    markSessionDetached(
-      current.sessionId,
-      'handback',
-    );
+    provider.agentKind === 'codex'
+      ? markSessionDetached(
+          current.sessionId,
+          'handback',
+        )
+      : true;
 
-  ctx.sessions.clear(
-    ctx.scope,
-  );
-
-  if (
-    typeof ctx.sessions
-      ?.flush ===
-    'function'
-  ) {
-    await ctx.sessions.flush();
-  }
+  await unbindScope(ctx);
 
   const lines: string[] = [
     '✅ **Lark → Windows handback completed**',
@@ -1319,7 +1284,7 @@ export async function handleLocalHandback(
     '',
     '👤 Owner: **Detached**（Windows-ready，但尚未由 Windows writer 接管）。',
     '',
-    'Codex Session 历史没有被删除。',
+    `${provider.label} Session 历史没有被删除。`,
   );
 
   if (!detachedRecorded) {
@@ -1338,7 +1303,7 @@ export async function handleLocalHandback(
       `cd ${powerShellQuote(
         cwd,
       )}`,
-      `codex3 resume ${current.sessionId}`,
+      provider.resumeHint(current.sessionId),
       '```',
     );
   }
@@ -1348,14 +1313,14 @@ export async function handleLocalHandback(
       '**Windows 中执行：**',
       '',
       '```powershell',
-      `codex3 resume ${current.sessionId}`,
+      provider.resumeHint(current.sessionId),
       '```',
     );
   }
 
   lines.push(
     '',
-    '在 Windows 接管期间，不要在这个 Lark scope 中发送普通 Codex 任务。',
+    `在 Windows 接管期间，不要在这个 Lark scope 中发送普通 ${provider.label} 任务。`,
   );
 
   await reply(

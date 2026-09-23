@@ -10,6 +10,7 @@ import type { ActiveRuns } from '../bot/active-runs';
 import { handleLocalStatusInteractive } from './local-status';
 import { handleLocalRelease } from './local-release';
 import { handleLocalHandoff } from './local-handoff.js';
+import { scopeProvider } from './session-provider.js';
 import {
   handleLocalHandback,
   handleLocalSessions,
@@ -188,9 +189,11 @@ const handlers: Record<string, Handler> = {
   '/windows': handleWindowsCommand,
   '/session': handleSessionCommand,
   '/local-status': async (args, ctx) => {
+    if (await rejectWindowsOnClaude(ctx)) return;
     await handleLocalStatusInteractive(args, ctx);
   },
   '/local-release': async (args, ctx) => {
+    if (await rejectWindowsOnClaude(ctx)) return;
     const markdown = await handleLocalRelease(args);
     await reply(ctx, markdown);
   },
@@ -415,8 +418,33 @@ async function handleLarkCommand(args: string, ctx: CommandContext): Promise<voi
   }
 }
 
+/**
+ * /windows drives the Codex Observer / Release Agent (~/.codex-monitor). A
+ * Claude Code profile has no such runtime: its Windows windows come from
+ * Claude's own process registry and are handled by /session list / handoff.
+ * Returns true when the command was answered here.
+ */
+async function rejectWindowsOnClaude(ctx: CommandContext): Promise<boolean> {
+  if (scopeProvider(ctx).agentKind !== 'claude') return false;
+
+  await reply(
+    ctx,
+    [
+      'ℹ️ **/windows 只适用于 Codex bot。**',
+      '',
+      '它管理的是 Codex 的 Windows Observer / Release Agent。Claude Code 在 Windows 上的会话请直接用：',
+      '',
+      '• **/session list** — 查看会话及其 Windows 运行状态',
+      '• **/session handoff <selector>** — 把 Windows 上空闲的 Claude 窗口接管到当前 Lark scope',
+    ].join('\n'),
+  );
+  return true;
+}
+
 /** Windows Codex runtime commands managed by the local Observer/Release Agent. */
 async function handleWindowsCommand(args: string, ctx: CommandContext): Promise<void> {
+  if (await rejectWindowsOnClaude(ctx)) return;
+
   const { subcommand, rest } = splitGroupedCommand(args);
 
   switch (subcommand) {
@@ -444,7 +472,7 @@ async function handleWindowsCommand(args: string, ctx: CommandContext): Promise<
   }
 }
 
-/** Global Codex Session inventory and ownership-transfer commands. */
+/** Global Session inventory and ownership-transfer commands for this profile's agent. */
 async function handleSessionCommand(args: string, ctx: CommandContext): Promise<void> {
   const { subcommand, rest } = splitGroupedCommand(args);
 
@@ -468,13 +496,13 @@ async function handleSessionCommand(args: string, ctx: CommandContext): Promise<
       await reply(
         ctx,
         [
-          '🗂️ **All Codex Sessions**',
+          `🗂️ **All ${scopeProvider(ctx).label} Sessions**`,
           '',
-          '• **/session list [handoff|use|handback|all|keyword]** — 查看 Session、Owner 与状态；默认按可 Handoff 分类，卡片顶部可切换',
+          '• **/session list [handoff|use|handback|all|keyword]** — 查看当前 bot 所用 agent（Codex 或 Claude Code，由 profile 决定）的 Session、Owner 与状态；卡片顶部可切换分类',
           '• **/session use <selector>** — Detached Session → 当前 Lark scope',
           '• **/session handoff <selector>** — Windows → 当前 Lark scope',
           '• **/session handback** — 当前 Lark scope → Detached / Windows-ready',
-          '• **/session tail [selector]** — 查看当前或指定 Session 的最后一条 Codex 可见回复',
+          '• **/session tail [selector]** — 查看当前或指定 Session 的最后一条可见回复',
           '',
           '兼容旧命令：**/sessions**、**/use**、**/local-handoff**、**/handback**',
         ].join('\n'),
@@ -1492,7 +1520,11 @@ function formatDoctorEchoStatus(echoText: string, state: RunState): string {
 }
 
 async function handleHelp(_args: string, ctx: CommandContext): Promise<void> {
-  const card = helpCard(ctx.agent.displayName);
+  const provider = scopeProvider(ctx);
+  const card = helpCard(ctx.agent.displayName, {
+    sessionLabel: provider.label,
+    windowsRuntime: provider.agentKind === 'codex',
+  });
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
 

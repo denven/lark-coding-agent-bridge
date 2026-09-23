@@ -149,8 +149,25 @@ describe('Claude slash command visible behavior', () => {
     const help = JSON.stringify(lastContent(h.channel));
     expect(help).toContain('Fake Agent');
     expect(help).toContain('lark-cli 身份策略');
-    expect(help).not.toContain('/lark');
+    // This fork groups scope commands under /lark; the help documents them.
+    expect(help).toContain('/lark status');
     expect(help).not.toContain('交给 Claude');
+    // A Claude profile manages Claude Sessions and has no Codex Observer, so
+    // its help must not describe Codex Sessions or offer /windows.
+    expect(help).toContain('All Claude Code Sessions');
+    expect(help).not.toContain('Codex Session');
+    expect(help).not.toContain('/windows');
+  });
+
+  it('points /windows at /session on a Claude profile instead of the Codex runtime', async () => {
+    const h = await createHarness();
+
+    for (const command of ['/windows status', '/local-status', '/local-release x']) {
+      await expect(h.run(command)).resolves.toBe(true);
+      const text = JSON.stringify(lastContent(h.channel));
+      expect(text).toContain('/windows 只适用于 Codex bot');
+      expect(text).toContain('/session handoff');
+    }
   });
 
   it('reports lark-cli user-ready for structured user records', async () => {

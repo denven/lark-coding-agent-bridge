@@ -14,7 +14,9 @@ $files = @(
     "Watch-CodexRelease.ps1",
     "Request-CodexRelease.ps1",
     "Release-CodexSession.ps1",
-    "Stop-CodexObserver.ps1"
+    "Stop-CodexObserver.ps1",
+    "Request-ClaudeRelease.ps1",
+    "Watch-ClaudeRelease.ps1"
 )
 
 New-Item `
