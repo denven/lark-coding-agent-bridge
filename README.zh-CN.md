@@ -38,6 +38,7 @@
 | Session ownership 模型 | Lark scope binding | Windows / Lark / Detached + 单 writer 规则 |
 | Mobile / Web 远程 Session 管理 | 通用 Lark 交互 | 针对 **Lark Mobile App** / **Lark Web** 优化 Session 切换与 ownership Action |
 | Action 身份 | 随命令而定 | UI 优先显示 Thread Name；底层执行始终使用 exact full Session ID |
+| Claude Code 会话 | 作为 `claude` profile 的 agent 运行 | Claude bot 上提供同一套 `/session` 控制面，见 [Claude Code 会话](#claude-code-会话) |
 
 ### 为什么增加这些能力
 
@@ -95,6 +96,54 @@ Thread Name
 ```
 
 因此 Project Name 和 cwd 仍可以显示为辅助信息，但不会再作为 Action 的 Session 身份，因为同一个 Project / cwd 下可以同时存在多个不同 Session。
+
+`/session list` 打开时显示分类标签 **Handoff / Use / Hand Back / All**，取最近 10 个 Session，默认打开第一个非空分类。每个分类下列出的，正好是会显示该操作按钮的 Session。更早的 Session 用 `/session list <关键字>` 查找。
+
+## Claude Code 会话
+
+一个 profile 只运行一种 agent（`agentKind` 为 `codex` 或 `claude`），所以所有 `/session` 命令都作用于**这个 profile 的 agent**。Codex bot 和 Claude bot 上的命令完全相同，不需要任何 agent 参数：
+
+```text
+/session list [handoff|use|handback|all|keyword]
+/session use <selector>
+/session handoff <selector>
+/session handback
+/session tail [selector]
+```
+
+要同时管理两种会话，就每种各用一个 bot：分别建群，或把两个 bot 放进同一个群。旧写法里的 `codex` / `claude` 仍被接受但会被忽略，已发出的旧卡片按钮不会失效。
+
+判断运行状态不需要 Observer：Claude Code 自己维护了一份运行中进程的登记（释放管理员窗口是另一回事，见下文）。
+
+| 数据 | 来源 |
+|---|---|
+| 会话列表、更新时间 | `~/.claude/projects/*/<sessionId>.jsonl` |
+| 工作目录 | transcript 里记录的 `cwd`（项目目录名的编码有损，无法反解） |
+| 标题 | `custom-title.json` → 最新的 `ai-title` → 第一条输入 |
+| Windows 上是否在运行 | `~/.claude/sessions/<pid>.json`：`status` 为 `idle / busy`；终端窗口的 `entrypoint` 为 `cli` |
+
+还没输入过任何内容的窗口没有 transcript，会从进程登记里列出，显示为 **No conversation yet**，不可接管。
+
+### Handoff 与 Claude Release Agent
+
+Handoff 会终止 Windows 上空闲的 `claude.exe`（对话都在磁盘上，只会丢失输入框里未发送的草稿），然后把会话绑定到当前 Lark scope。`Request-ClaudeRelease.ps1` 只有在确认这是**唯一一个、空闲的终端窗口**，且进程创建时间与登记的 `procStart` 一致时才会动手。
+
+bridge 以 **LIMITED**（普通权限）计划任务运行，而 Windows 不允许普通进程检查或终止管理员进程。如果你在**管理员 PowerShell** 里启动 Claude，handoff 就需要以管理员权限运行的 **Claude Release Agent**：
+
+```text
+bridge（普通权限）        → ~/.claude-monitor/requests/release-<id>.json
+Release Agent（管理员权限）→ 校验、终止，写入 results/release-<id>.json
+```
+
+Codex 不需要这一步，是因为 `codex3` 在它所在的管理员终端里启动了自己的 Release Agent。Claude 是直接启动的，所以需要在管理员 PowerShell 里注册一次代理，之后每次登录都会以管理员权限自动启动，不弹 UAC：
+
+```powershell
+.\scripts\windows\Register-ClaudeReleaseAgent.ps1
+# 取消注册：
+.\scripts\windows\Register-ClaudeReleaseAgent.ps1 -Unregister
+```
+
+没有代理时，管理员权限的 Claude 窗口会显示 **Running as administrator — Claude release agent not running**，不提供 Handoff 按钮。从普通终端启动的 Claude 窗口不需要代理也能接管。
 
 ### Screenshots
 
@@ -204,13 +253,17 @@ scripts/windows/
 ├─ Request-CodexRelease.ps1
 ├─ Release-CodexSession.ps1
 ├─ Stop-CodexObserver.ps1
+├─ Request-ClaudeRelease.ps1        Claude：校验并释放一个空闲窗口
+├─ Watch-ClaudeRelease.ps1          Claude：管理员权限的 Release Agent
+├─ Register-ClaudeReleaseAgent.ps1  Claude：登录时以管理员权限启动代理
 └─ Install-CodexBridgeScripts.ps1
 ```
 
 运行时数据位于：
 
 ```text
-%USERPROFILE%\.codex-monitor\
+%USERPROFILE%\.codex-monitor\    Codex
+%USERPROFILE%\.claude-monitor\   Claude Release Agent 的请求 / 结果 / 心跳
 ```
 
 ## Build and install

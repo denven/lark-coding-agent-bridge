@@ -980,6 +980,74 @@ Lark SessionStore
 
 to present thread/project/owner/cwd information.
 
+The card opens on category tabs (**Handoff / Use / Hand Back / All**) drawn from
+the 10 most recent Sessions. `sessionCategory()` mirrors
+`sessionActionButtons()`, so a tab lists exactly the Sessions that render its
+button. A tab click recalls the old card and posts a new one: in-place
+`updateCard()` (`im.v1.message.patch`) fails silently, because Feishu answers a
+refused patch with HTTP 200 and a non-zero body code that the SDK discards.
+
+### Binding must write the session catalog
+
+`run-flow.ts` resolves what to resume from `sessionCatalog.activeFor(scope,
+agent, cwdRealpath, policyFingerprint)` first, and — for Claude only — falls
+back to `sessions.resumeFor()`. Writing `sessions.json` alone is therefore not
+a binding: Codex ignores it entirely. `src/commands/session-binding.ts`
+(`bindScopeToSession()` / `unbindScope()`) writes both, mirroring upstream's
+`applyResume()` and `/new`. The catalog key includes the cwd, and `use`
+switches the cwd, so the identity is recomputed after `setCwd()`. Handback must
+archive the catalog entry, or the next Lark message would still resume the
+Session alongside the Windows writer.
+
+### Claude Code sessions
+
+A profile runs exactly one agent, so every `/session` command operates on the
+profile's own agent, and the commands are identical on a Codex and a Claude
+bot. `SessionProvider` (`src/commands/session-provider.ts`) separates the
+agent-neutral shapes (`SessionInventoryItem`, `HandoffState`) from the code
+that fills them; the Claude side lives in `claude-session-state.ts`,
+`claude-handoff.ts` and `src/session/claude-transcript.ts`.
+
+| Data | Source |
+|---|---|
+| Sessions, updated time | `~/.claude/projects/*/<uuid>.jsonl` |
+| cwd | `cwd` inside the transcript (the directory name is a lossy encoding) |
+| Title | `custom-title.json` → latest `ai-title` → first prompt, unwrapping the bridge's `<user_input>` |
+| Running on Windows | `~/.claude/sessions/<pid>.json` (Claude's own live-process registry) |
+
+Registry facts, each verified on a real machine and each contradicting an
+initial assumption:
+
+1. `updatedAt` is not a heartbeat — it moves only on activity, so liveness comes
+   from the PID and identity from `procStart` (a Windows FILETIME equal to the
+   live process's `StartTime.ToFileTimeUtc()`).
+2. `claude -p`, including the bridge's own runs, registers too, as
+   `entrypoint: sdk-cli`; only `cli` is a terminal window.
+3. A window that has never been sent anything has no transcript yet; it is
+   listed from the registry as *No conversation yet* and is not transferable.
+
+**EPERM is not "gone".** The bridge is an upstream `/RL LIMITED` scheduled task
+(`\LarkChannelBridge.Bot.<profile>`), so it stays non-elevated even when started
+from an elevated terminal. Probing an elevated process from it returns EPERM,
+which the old `isProcessAlive()` read as dead — elevated Claude windows showed
+as Detached. `processState()` now distinguishes `alive / denied / gone`. Codex
+never showed the bug because its liveness comes from the Observer's heartbeat
+file; the PID fallback was silently wrong for elevated Codex writers too.
+
+**Handoff.** `Request-ClaudeRelease.ps1` terminates the writer only if it is a
+single idle `cli` window whose `procStart` matches, then removes the registry
+files the forced exit left behind. A non-elevated bridge cannot do this to an
+elevated window, so — as Codex does with its `codex3`-started Release Agent —
+the work is delegated to an elevated **Claude Release Agent**
+(`Watch-ClaudeRelease.ps1`) over files in `~/.claude-monitor`
+(`requests/`, `results/`, heartbeat `agent.json`). Codex gets an elevated agent
+for free because `codex3` runs inside the elevated terminal; Claude is launched
+directly, so `Register-ClaudeReleaseAgent.ps1` registers a `/RL HIGHEST`
+`ONLOGON` task — the bridge's own mechanism with a different run level.
+Verified from a Medium-integrity process: with the agent running, an elevated
+window turns Ready, and releasing a disposable elevated window returned
+`OK|RELEASED` in about 2.3 s.
+
 ---
 
 ## 29. Why `/session list` Should Not Fully Replay Every Rollout

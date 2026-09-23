@@ -1039,8 +1039,201 @@ Lark SessionStore
 
 分类与每行按钮同源（`sessionCategory()` 镜像 `sessionActionButtons()`），
 因此列在 Handoff 下的 Session 一定会渲染 Handoff 按钮。默认打开可 Handoff
-分类；若为空则依次回退到 Hand Back / Use / All。点击分类按钮会就地更新同一
-张卡片，不会堆叠新卡片。更早的 Session 用 `/session list <keyword>` 查找。
+分类；若为空则依次回退到 Hand Back / Use / All。更早的 Session 用
+`/session list <keyword>` 查找。
+
+点击分类按钮会**撤回旧卡片并发出新卡片**（先发后撤，以便在话题群里落到正确的
+thread），因此卡片会移到对话底部。没有用原地更新：`channel.updateCard()` 底层的
+`im.v1.message.patch` 被飞书拒绝时返回 HTTP 200 + 非零 code，SDK 丢弃了响应，
+既不抛错也不生效；CardKit 2.0 的 `createCard()` 又不接受 `shell()` 生成的 v1 结构。
+
+### Claude Code 会话
+
+**命令在 Codex bot 和 Claude bot 上完全相同**，不带任何 agent 参数：
+
+```text
+/session list [handoff|use|handback|all|keyword]
+/session use <selector>
+/session handoff <selector>
+/session handback
+/session tail [selector]
+```
+
+bot 由自己 profile 的 `agentKind` 决定操作哪种会话——一个 profile 只有一个
+`agentKind`（`profile-schema.ts`），`createRuntimeAgent()` 只构造一个 adapter，
+运行期间不会改变。所以同一个 bot 只列出、只绑定、只接管自己那一种会话；要同时
+管理两种，就各用一个 bot（各建一个 Group，或把两个 bot 放进同一个 Group）。
+
+旧写法里的 `codex` / `claude` 参数仍被接受但会被忽略（`withoutAgentTokens()`），
+以免已经发在聊天里的旧卡片按钮失效。选择器命令只忽略**开头**的这个词、且后面
+还有内容时才忽略，因此标题恰好叫 "claude" 的会话仍能被选中。
+
+实现在 `src/commands/session-provider.ts`：`SessionProvider` 接口把"形状"与
+"读取"分开——`SessionInventoryItem` / `HandoffState` 本就 agent 无关，只有填充
+逻辑是 Codex 专用的。Claude 实现见 `claude-session-state.ts` 与
+`src/session/claude-transcript.ts`。
+
+数据来源：
+
+| 字段 | 来源 |
+|---|---|
+| sessionId / 更新时间 | `~/.claude/projects/*/<uuid>.jsonl` 文件名与 mtime |
+| cwd | transcript 行内 `cwd` 字段（目录名编码有损，不可反解） |
+| 标题 | `<id>/custom-title.json` → 最后一条 `ai-title` → 首条 user prompt |
+| 运行态 | `~/.claude/sessions/<pid>.json`（Claude 自带注册表，无需 Observer） |
+
+旧版 Claude 写的 per-project `sessions-index.json` 被刻意忽略：它比其列出的
+transcript 活得久（定期清理只删 transcript），读它会产生幽灵行。
+
+**能力**：Codex 与 Claude Code 的 list / tail / use / handback / handoff 全部对等。
+
+`SessionProvider.supportsHandoff` 为 false 的 provider（目前没有），其 Windows
+运行中的会话既不进 Handoff 分类也不渲染 Handoff 按钮，保持两者一致。
+
+### Claude 注册表的三个实测结论
+
+三者都推翻了最初的假设，直接决定了实现：
+
+1. **`updatedAt` 不是心跳。** 它只在有活动或状态变化时更新；空闲会话的条目
+   会合法地停在几分钟前。若按 Codex 的 30 秒新鲜度判定，空闲会话——也就是
+   唯一可以安全 handoff 的状态——永远不会是 Ready。因此存活性只看 PID，
+   身份再由 release 脚本用 `procStart` 校验。
+2. **`claude -p` 也会注册，且 `kind` 同样是 `"interactive"`**，区别只在
+   `entrypoint`：终端窗口是 `"cli"`，`-p`（包括 bridge 自己的 Lark 运行）是
+   `"sdk-cli"`，退出时条目会被删除。若不排除，每次 Lark 运行都会被误报为
+   "Windows · Working" 或 "⚠ Windows + Lark"。
+3. **从未输入过的窗口没有 transcript。** 登记条目在启动时就写出，transcript
+   要等第一条输入才创建。只扫 transcript 会漏掉这类窗口，所以要从登记里补上。
+
+判定规则（`claude-session-state.ts`）。除 Busy 外，Claude 的 Needs validation
+全部标记为 `transferable: false`——释放脚本对这些情况都会拒绝，提供按钮只会
+注定失败：
+
+| 条件 | 结果 |
+|---|---|
+| 无存活条目，或 `entrypoint` 以 `sdk` 开头 | Detached |
+| `status: "busy"` | Busy |
+| `status` 不是 `"idle"`（未知取值） | Needs validation |
+| `entrypoint` 不是 `"cli"`（如 IDE） | Needs validation，需手动关闭 |
+| 管理员窗口（EPERM）且 Release Agent 未运行 | Needs validation |
+| 没有 transcript | Needs validation（No conversation yet） |
+| 缺 `procStart` | Needs validation |
+| 其余 | Ready |
+
+### 权限级别：EPERM 不等于进程已死
+
+bridge 是上游以 `/RL LIMITED` 注册的计划任务（`\LarkChannelBridge.Bot.<profile>`），
+即使从管理员终端执行 `lark-channel-bridge start`，也只是 `schtasks /Run`，
+任务按注册时的权限启动，**不继承终端的管理员权限**。
+
+普通权限进程对管理员进程调用 `process.kill(pid, 0)`，得到的是 **EPERM**（进程存在
+但无权打开）。原来的 `isProcessAlive()` 把所有异常都当作「进程已死」，导致管理员
+窗口里正在运行的会话被显示为 Detached。现在 `processState()` 区分
+`alive / denied / gone`，`denied` 视为存活。
+
+Codex 从未表现出这个问题，是因为它判断「在运行」靠的是 Observer 写的心跳文件，
+PID 探测只是兜底——而那个兜底对管理员进程其实一直是错的。此修复也关闭了一个
+潜在风险：Observer 心跳断掉而 Codex 仍在运行时，旧代码会误判为 Detached，
+从而允许 `/session use` 造成双 writer。
+
+> 验证方法的教训：从管理员会话里做的测试复现不了这个问题；`runas /trustlevel`
+> 启动的子进程仍是 High 完整性级别。要得到与 bridge 相同的 Medium 级别，
+> 可以借 `explorer.exe` 启动（它本身是 Medium）。
+
+未知 entrypoint 仍算 writer：误判为 Windows-active 只会挡住 `/session use`，
+误判为 Detached 则会造成双 writer。
+
+### Claude handoff：`Request-ClaudeRelease.ps1`
+
+Claude 没有 Observer，校验与终止合并在一个脚本里（`scripts/windows/`，由
+`Install-CodexBridgeScripts.ps1` 安装到 `~\Scripts`）。输出协议与
+`Request-CodexRelease.ps1` 同形：`OK|RELEASED|<id>|<pid>` / `ERROR|<CODE>|...`。
+
+终止前必须全部满足，否则拒绝且不动任何进程：
+
+- 恰好一个存活条目认领该会话（否则 `AMBIGUOUS_WRITER`）
+- `entrypoint == "cli"`（否则 `UNSUPPORTED_ENTRYPOINT`）
+- `status == "idle"`，终止前再读一次（否则 `SESSION_NOT_IDLE`）
+- `procStart` 等于存活进程的 `StartTime.ToFileTimeUtc()`（否则 `PID_REUSED`；
+  已实测两者逐位相等）
+- 映像名为 `claude`（否则 `NOT_CLAUDE_PROCESS`）
+
+然后 `taskkill /PID <pid> /T /F`（连带 MCP server 等子进程，父 PowerShell 终端
+保留），确认进程退出，并删除被强杀进程遗留的 `<pid>.json` / `<pid>.*.key`，
+防止 PID 被复用后误判。transcript 是 append-only 且会话处于 idle，对话完整；
+只会丢失终端输入框里未发送的草稿。
+
+`-DryRun` 开关执行全部校验但不终止，输出 `OK|DRY_RUN|<id>|<pid>`，用于排查。
+
+没有使用注册表里的 `messagingSocketPath` 命名管道做优雅退出：协议未公开、
+`peerProtocol` 随版本变化。`claude stop <id>` 只对 `--bg` 后台会话有效。
+
+强制终止的副作用：Claude 来不及恢复终端模式（如焦点上报），原终端之后切换
+焦点时会打印出 `[I[` 之类的转义序列。关闭该标签页，或在其中执行
+`[Console]::Write("$([char]27)[?1004l")` 即可。
+
+### Claude Release Agent：`Watch-ClaudeRelease.ps1`
+
+bridge 是普通权限，终止不了管理员窗口，而由 bridge 直接启动的释放脚本也继承
+普通权限。Codex 没有这个问题，是因为 `codex3` 在管理员终端里启动了 Release
+Agent，终止动作由它完成；bridge 只写一个请求文件。Claude 采用同样的结构：
+
+```text
+bridge（LIMITED）
+  └─ requestClaudeRelease()
+       代理心跳新鲜 → 写 ~/.claude-monitor/requests/release-<id>.json，轮询 results/
+       否则         → 直接运行 Request-ClaudeRelease.ps1（仅对非管理员窗口有效）
+
+Watch-ClaudeRelease.ps1（管理员权限，全机单例 Global\LarkClaudeReleaseAgent）
+  └─ 取请求 → 校验 UUID → 独立进程运行 Request-ClaudeRelease.ps1 → 写结果
+```
+
+协议要点：
+
+- 只通过文件通信，bridge 从不直接接触管理员进程；代理是否在运行也看心跳文件
+  `agent.json`（每 2 秒更新，10 秒内有效），不探测 PID。
+- 请求先写 `.tmp` 再 rename，代理不会读到半个文件；代理先删除请求再执行，
+  崩溃也不会重复执行。
+- 请求带 `expiresAt`（bridge 截止时间前 2 秒）；过期请求被拒绝，避免 bridge
+  已放弃等待后才关掉窗口。bridge 超时会撤回尚未被领取的请求。
+- 请求只携带 Session ID，经 UUID 校验后作为参数传入，不拼接命令。
+- 代理超时（`AGENT_TIMEOUT`）时 Lark 不会绑定；窗口若已被关闭，会话处于
+  Detached，可以安全地 `/session use`。
+
+**为什么需要计划任务**：代理必须以管理员权限运行，而 bridge（普通权限）只能通过
+UAC 确认框启动管理员进程，用户在手机上时无人能点。`codex3` 能免费得到管理员权限，
+是因为它运行在用户打开的管理员终端里；Claude 是直接启动的，没有这个挂载点。
+`Register-ClaudeReleaseAgent.ps1` 注册一个 `/RL HIGHEST`、`ONLOGON` 的计划任务
+`\LarkChannelBridge.ClaudeReleaseAgent`——与 bridge 自己用的机制相同，只是权限
+级别不同——注册一次，之后每次登录自动以管理员权限启动，不弹 UAC。
+
+实测（Medium 级别进程，与 bridge 处境相同）：代理运行时，管理员窗口由
+「Running as administrator」变为 Ready；经代理释放一个临时管理员窗口耗时约
+2.3 秒，返回 `OK|RELEASED`，进程退出、登记文件清理、请求与结果目录无残留。
+
+### 绑定必须同时写 session catalog
+
+`run-flow.ts` 决定续接哪个会话的顺序：
+
+1. `sessionCatalog.activeFor(scope, agent, cwdRealpath, policyFingerprint)`
+2. 仅 Claude：`sessions.resumeFor(scope, cwdRealpath)`
+
+所以**只写 `sessions.json` 不算绑定**：Codex 完全不读它，Claude 则会被同 scope
+同 cwd 的旧 catalog 条目覆盖。`src/commands/session-binding.ts` 的
+`bindScopeToSession()` / `unbindScope()` 同时写两处，分别对齐上游的
+`applyResume()` 和 `/new`。
+
+两个细节：
+
+- catalog key 含 `cwdRealpath`，而 `policyFingerprint` 也哈希了 cwd。`use`
+  会切换 scope 的 cwd，所以命令开始时算好的 `ctx.sessionCatalogIdentity` 已过期，
+  必须在 `setCwd()` 之后重新计算 identity。
+- handback 必须 archive catalog 条目，否则下一条 Lark 消息仍会从 catalog 续接
+  这个会话，与 Windows 形成双 writer。
+
+> 此修复之前，Codex 的 `/session use` 与 handoff 只写 `sessions.json`，续接实际
+> 从未生效——日志中没有任何一次 run 续接过被接管的 Windows 会话，下一条消息
+> 都开了新 thread。
 
 ---
 

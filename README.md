@@ -38,6 +38,7 @@ The upstream bridge already lets a Lark Chat / Group / Topic interact with a loc
 | Session ownership model | Lark scope binding | Windows / Lark / Detached with a single-writer rule |
 | Mobile/Web remote session control | General Lark interaction | Session switching and ownership actions optimized for **Lark Mobile App** and **Lark Web** |
 | Action identity | Command-specific | Readable Thread Name in UI; exact full Session ID for execution |
+| Claude Code sessions | Run as the agent of a `claude` profile | The same `/session` control plane on a Claude bot — see [Claude Code sessions](#claude-code-sessions) |
 
 ### Why these extensions exist
 
@@ -95,6 +96,54 @@ ALWAYS the exact full Session ID
 ```
 
 Project names and working directories are shown as metadata, but are **not** used as the identity of an action because several sessions can share the same project or cwd.
+
+`/session list` opens on category tabs — **Handoff**, **Use**, **Hand Back**, **All** — drawn from the 10 most recent Sessions, defaulting to the first category that has a Session in it. Each tab lists exactly the Sessions that render that action's button. Use `/session list <keyword>` to find an older Session.
+
+## Claude Code sessions
+
+A profile runs exactly one agent (`agentKind` is `codex` or `claude`), so every `/session` command works on **that profile's agent**. The commands are identical on a Codex bot and a Claude bot — there is no agent parameter:
+
+```text
+/session list [handoff|use|handback|all|keyword]
+/session use <selector>
+/session handoff <selector>
+/session handback
+/session tail [selector]
+```
+
+To manage both kinds of Session, run one bot per profile — in separate groups, or both bots in the same group. The legacy words `codex` / `claude` are still accepted and ignored, so older card buttons keep working.
+
+Claude Code needs no Observer to track status: it keeps its own live-process registry. (Releasing an elevated window is a separate matter — see below.)
+
+| Data | Source |
+|---|---|
+| Sessions, updated time | `~/.claude/projects/*/<sessionId>.jsonl` |
+| Working directory | the `cwd` recorded inside the transcript (the project directory name is a lossy encoding) |
+| Title | `custom-title.json` → latest `ai-title` → first prompt |
+| Running on Windows | `~/.claude/sessions/<pid>.json` — `status: idle / busy`, `entrypoint: cli` for a terminal window |
+
+A window that has not been sent anything yet has no transcript; it is listed from the registry as **No conversation yet** and cannot be handed off.
+
+### Handoff and the Claude Release Agent
+
+Handoff terminates the idle Windows `claude.exe` (the conversation is on disk, so nothing is lost but an unsent draft) and binds the Session to the current Lark scope. `Request-ClaudeRelease.ps1` refuses unless the writer is a single idle terminal window whose process creation time matches the registry's `procStart`.
+
+The bridge runs as a **LIMITED** scheduled task, and Windows does not let a non-elevated process inspect or terminate an elevated one. If you start Claude from an **elevated (Run as administrator) PowerShell**, handoff needs the elevated **Claude Release Agent**:
+
+```text
+bridge (LIMITED)  → ~/.claude-monitor/requests/release-<id>.json
+Release Agent (elevated) → validates, terminates, writes results/release-<id>.json
+```
+
+Codex does not need this step because `codex3` starts its Release Agent from the elevated terminal it runs in. Claude is launched directly, so register the agent once from an elevated PowerShell — it then starts elevated at every logon, with no UAC prompt:
+
+```powershell
+.\scripts\windows\Register-ClaudeReleaseAgent.ps1
+# remove it again:
+.\scripts\windows\Register-ClaudeReleaseAgent.ps1 -Unregister
+```
+
+Without the agent, elevated Claude windows are shown as **Running as administrator — Claude release agent not running** and offer no Handoff button. Claude windows started from a normal terminal can be handed off without it.
 
 ### Screenshots
 
@@ -196,13 +245,17 @@ scripts/windows/
 ├─ Request-CodexRelease.ps1
 ├─ Release-CodexSession.ps1
 ├─ Stop-CodexObserver.ps1
+├─ Request-ClaudeRelease.ps1        Claude: validate and release one idle window
+├─ Watch-ClaudeRelease.ps1          Claude: elevated Release Agent
+├─ Register-ClaudeReleaseAgent.ps1  Claude: run the agent elevated at logon
 └─ Install-CodexBridgeScripts.ps1
 ```
 
 Runtime data is stored under:
 
 ```text
-%USERPROFILE%\.codex-monitor\
+%USERPROFILE%\.codex-monitor\    Codex
+%USERPROFILE%\.claude-monitor\   Claude Release Agent requests / results / heartbeat
 ```
 
 ## Build and install
