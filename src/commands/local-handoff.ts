@@ -1250,7 +1250,7 @@ export async function handleLocalHandoff(
         hoverTips: 'Read the latest completed user-visible Codex response for this Session.',
       },
       {
-        text: '↩ Hand Back',
+        text: '↩ Hand Back to Windows',
         value: { cmd: 'handback' },
         style: 'primary',
         hoverTips: 'Unbind this Session from the current Lark scope and make it Detached / Windows-ready.',

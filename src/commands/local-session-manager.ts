@@ -283,51 +283,6 @@ function sessionTitle(
   );
 }
 
-function shortSessionId(
-  sessionId: string,
-): string {
-  if (sessionId.length <= 16) {
-    return sessionId;
-  }
-
-  return `${sessionId.slice(0, 12)}…`;
-}
-
-function normalizeThreadName(
-  value: string | undefined,
-): string | undefined {
-  const name = value?.trim();
-  return name ? name : undefined;
-}
-
-function sessionActionLabel(
-  item: SessionInventoryItem,
-  peers: SessionInventoryItem[],
-): string {
-  /*
-   * Keep the action label human-readable without pretending that a project
-   * directory identifies a Session. Thread names are preferred; duplicate
-   * names get a short Session ID suffix; unnamed Sessions use a short ID.
-   */
-  const threadName = normalizeThreadName(item.threadName);
-
-  if (!threadName) {
-    return shortSessionId(item.sessionId);
-  }
-
-  const duplicateCount = peers.filter(
-    (peer) =>
-      normalizeThreadName(peer.threadName)?.toLocaleLowerCase() ===
-      threadName.toLocaleLowerCase(),
-  ).length;
-
-  if (duplicateCount > 1) {
-    return `${threadName} · ${shortSessionId(item.sessionId)}`;
-  }
-
-  return threadName;
-}
-
 function inventoryForContext(
   ctx: any,
 ): {
@@ -473,12 +428,14 @@ function sessionActionButtons(
   ctx: any,
   item: SessionInventoryItem,
   bindings: LarkBinding[],
-  peers: SessionInventoryItem[],
   provider: SessionProvider,
 ): ButtonSpec[] {
   const linked = bindingsFor(item, bindings);
   const current = linked.some((binding) => binding.current);
-  const target = sessionActionLabel(item, peers);
+  // Labels name the action and its direction only: the row above already
+  // shows the Session, and short labels keep two buttons per line on mobile.
+  // The title is repeated in the hover tip for desktop.
+  const title = sessionTitle(item);
 
   const buttons: ButtonSpec[] = [lastResponseButton(item, provider)];
 
@@ -490,10 +447,10 @@ function sessionActionButtons(
 
   if (current) {
     buttons.push({
-      text: `↩ Hand Back ${target}`,
+      text: '↩ Hand Back to Windows',
       value: { cmd: 'handback' },
       style: 'primary',
-      hoverTips: 'Unbind the current Lark scope and make this Session Detached / ready to resume on Windows.',
+      hoverTips: `Unbind "${title}" from this Lark scope and make it Detached / ready to resume on Windows.`,
     });
     return buttons;
   }
@@ -516,27 +473,27 @@ function sessionActionButtons(
     }
 
     buttons.push({
-      text: `↪ Handoff ${target}`,
+      text: '↪ Handoff to Lark',
       value: {
         cmd: 'local-handoff',
         // Always target the exact full Session ID; the label is display-only.
         arg: item.sessionId,
       },
       style: 'primary',
-      hoverTips: 'Release the Windows writer and bind this Session to the current Lark scope.',
+      hoverTips: `Release the Windows writer of "${title}" and bind it to this Lark scope.`,
     });
     return buttons;
   }
 
   buttons.push({
-    text: `▶ Use ${target}`,
+    text: '▶ Use in Lark',
     value: {
       cmd: 'use',
       // Always target the exact full Session ID; the label is display-only.
       arg: item.sessionId,
     },
     style: 'primary',
-    hoverTips: 'Bind this Detached Codex Session to the current Lark scope.',
+    hoverTips: `Bind the Detached ${provider.label} Session "${title}" to this Lark scope.`,
   });
 
   return buttons;
@@ -673,7 +630,7 @@ export async function handleLocalSessions(
     lines.push(`🕒 ${formatUpdated(item.updatedAtMs)}`);
     elements.push(divMd(lines.join('\n')));
 
-    const buttons = sessionActionButtons(ctx, item, bindings, candidates, provider);
+    const buttons = sessionActionButtons(ctx, item, bindings, provider);
     if (buttons.length > 0) {
       elements.push(actions(buttons));
     }
@@ -696,11 +653,11 @@ export async function handleLocalSessions(
     divMd(
       [
         '**Session actions**',
-        '• **Use in this Lark** — Detached Session → current Lark scope',
+        '• **Use in Lark** — Detached Session → this Lark scope',
         provider.supportsHandoff
-          ? '• **Handoff to this Lark** — Windows → current Lark scope'
+          ? '• **Handoff to Lark** — Windows → this Lark scope'
           : `• **Handoff** — not available for ${provider.label} yet; quit the Windows window first, then Use`,
-        '• **Hand Back to Windows** — current Lark scope → Detached / Windows-ready',
+        '• **Hand Back to Windows** — this Lark scope → Detached / Windows-ready',
         `• **Last Response** — read the latest completed user-visible ${provider.label} response`,
         ...olderHint,
       ].join('\n'),
@@ -1104,33 +1061,56 @@ export async function handleLocalUse(
     });
   }
 
-  await reply(
-    ctx,
-    [
-      '✅ **Lark Session switched**',
-      '',
-      `🏷 **Thread:** ${clean(
-        sessionTitle(
-          target,
-        ),
-      )}`,
-      '',
-      `🔗 **Session:** \`${clean(
-        target.sessionId,
-      )}\``,
-      '',
-      `📂 **Directory:** \`${clean(
-        target.cwd,
-      )}\``,
-      '',
-      ...(bound.catalogBound || provider.agentKind === 'claude'
-        ? ['**下一条普通消息将继续这个 Session。**']
-        : [
-            // Codex resumes only from the session catalog (run-flow.ts).
-            '⚠️ **Session catalog 不可用，Codex 无法续接这个 Session；下一条消息会开启新 thread。**',
-          ]),
-    ].join('\n'),
+  const summary = [
+    `🏷 **Thread:** ${clean(sessionTitle(target))}`,
+    ...(target.projectName ? [`📁 **Project:** ${clean(target.projectName)}`] : []),
+    `🔗 **Session:** ${clean(target.sessionId)}`,
+    `📂 **Directory:** ${clean(target.cwd)}`,
+    '👤 **Owner:** Lark · Current',
+    '',
+    ...(bound.catalogBound || provider.agentKind === 'claude'
+      ? ['**Continue by sending a normal message in this Lark scope.**']
+      : [
+          // Codex resumes only from the session catalog (run-flow.ts).
+          '⚠️ **Session catalog 不可用，Codex 无法续接这个 Session；下一条消息会开启新 thread。**',
+        ]),
+  ];
+
+  /*
+   * Like a handoff, show where the conversation left off — a Detached
+   * Session was usually last used on Windows, so this is what the user needs
+   * to pick it up from Lark. Display only: the resumed Session already has
+   * the full history.
+   */
+  const lastResponse = await provider.readLastResponse(target, 5_000);
+
+  const elements: object[] = [divMd(summary.join('\n')), { tag: 'hr' }];
+
+  if (lastResponse) {
+    elements.push(divMd('**💬 Last Response**'), divPlain(lastResponse.text));
+    if (lastResponse.truncated) {
+      elements.push(
+        divMd(`_The response was shortened for Lark display; the full text remains in the ${provider.label} transcript._`),
+      );
+    }
+  }
+  else {
+    elements.push(divMd('💬 **Last Response:** no completed user-visible response was found.'));
+  }
+
+  elements.push(
+    { tag: 'hr' },
+    actions([
+      {
+        text: '↩ Hand Back to Windows',
+        value: { cmd: 'handback' },
+        style: 'primary',
+        hoverTips: 'Unbind this Session from the current Lark scope and make it Detached / Windows-ready.',
+      },
+    ]),
   );
+
+  await replyCard(ctx, shell('✅ Session Now in Lark', elements));
 }
 
 function powerShellQuote(
