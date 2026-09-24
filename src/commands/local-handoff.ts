@@ -906,6 +906,57 @@ export async function handleLocalHandoff(
   }
 
   /*
+   * A release that cannot succeed (e.g. the recorded
+   * Codex already exited and only a stale Observer is
+   * left) is refused here with its reason, rather than
+   * sent down a release chain that can only time out.
+   */
+  if (
+    target.handoff.transferable ===
+    false
+  ) {
+    await reply(
+      ctx,
+      [
+        '⛔ **这个 Windows Session 不能从 Lark 接管。**',
+        '',
+        `🏷 **Thread:** ${clean(
+          sessionDisplayName(
+            target,
+          ),
+        )}`,
+        '',
+        `🔄 **Handoff:** ${clean(
+          formatHandoffState(
+            target.handoff,
+          ),
+        )}`,
+        '',
+        ...(target.handoff.reason?.startsWith('Codex exited')
+          ? [
+              '它的 Codex 已经退出，只剩一个遗留的 Observer 还在写心跳（codex3 终端被直接关闭时，清理步骤没有运行）。',
+              '',
+              `在 Windows 的管理员 PowerShell 中结束这个 Observer 后（codex3 在管理员终端里启动的 Observer 也是管理员权限），Session 会变为 Detached，即可 **/session use**：\`Stop-Process ${target.handoff.launch?.observerPid ?? '<pid>'}\``,
+            ]
+          : [
+              // Launch mapping unavailable / Release Agent not recorded.
+              '这个 Codex 没有经过 codex3 的 attach（例如在 attach 机制出现之前启动、手动启动，或 attach 没有完成），没有 Release Agent 能释放它。',
+              '',
+              '请在 Windows 上退出这个 Codex，再执行 **/session use**。以后用 `codex3` 或 `codex3 resume <Session ID>` 打开，就能正常 handoff。',
+              ...(target.status?.observerPid
+                ? [
+                    '',
+                    `它的 Observer 若是手动启动的，不会随 Codex 退出，需要在管理员 PowerShell 中一并结束：\`Stop-Process ${target.status.observerPid}\``,
+                  ]
+                : []),
+            ]),
+      ].join('\n'),
+    );
+
+    return;
+  }
+
+  /*
    * Important:
    *
    * Release by the fully resolved Session ID,

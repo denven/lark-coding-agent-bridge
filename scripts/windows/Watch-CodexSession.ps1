@@ -8,7 +8,24 @@ param(
     [string]$MonitorHome =
         "$HOME\.codex-monitor",
 
-    [int]$HeartbeatSeconds = 5
+    [int]$HeartbeatSeconds = 5,
+
+    # Passed by Attach-CodexObserver. When set, the Observer exits
+    # once this Codex process is gone and does the cleanup codex3's
+    # finally block would have done. Without it, closing a codex3
+    # terminal with the X button (finally never runs) left the
+    # Observer heartbeating "Waiting" for a Codex that no longer
+    # existed — the Session looked Windows-owned and handoff-ready.
+    #
+    # 0 (started by hand or by an older Attach) keeps the previous
+    # behaviour: the writer is unknown, so never self-exit.
+    [int]$CodexPid = 0,
+
+    # Creation time of $CodexPid, to tell a reused PID apart.
+    [string]$CodexCreatedUtc = "",
+
+    # Launch whose mapping and claim to remove on self-exit.
+    [string]$LaunchId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -645,6 +662,153 @@ function Write-Status {
     Write-JsonAtomic `
         -Path $statusPath `
         -Value $status
+}
+
+
+# ============================================================
+# Own Codex process
+# ============================================================
+
+$expectedCodexStartUtc =
+    $null
+
+if ($CodexCreatedUtc) {
+
+    try {
+        $expectedCodexStartUtc =
+            ([datetimeoffset]::Parse($CodexCreatedUtc)).UtcDateTime
+    }
+    catch {
+    }
+}
+
+
+function Test-CodexGone {
+
+    if ($CodexPid -le 0) {
+        return $false
+    }
+
+
+    $process =
+        Get-Process `
+            -Id $CodexPid `
+            -ErrorAction SilentlyContinue
+
+    if (-not $process) {
+        return $true
+    }
+
+
+    if ($expectedCodexStartUtc) {
+
+        try {
+            $actualStartUtc =
+                $process.StartTime.ToUniversalTime()
+        }
+        catch {
+            # The PID is alive but unreadable: do not call it gone.
+            return $false
+        }
+
+        # Same PID, different creation time: Codex exited and an
+        # unrelated process inherited the PID.
+        if (
+            [Math]::Abs(
+                ($actualStartUtc - $expectedCodexStartUtc).TotalSeconds
+            ) -gt 2
+        ) {
+            return $true
+        }
+    }
+
+
+    return $false
+}
+
+
+function Read-JsonFileOrNull {
+
+    param(
+        [string]$Path
+    )
+
+    try {
+
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return $null
+        }
+
+        return (
+            [System.IO.File]::ReadAllText($Path).
+            TrimStart([char]0xFEFF) |
+            ConvertFrom-Json
+        )
+    }
+    catch {
+
+        return $null
+    }
+}
+
+
+# Mirrors Stop-CodexObserver.ps1, which codex3's finally block runs
+# on a clean exit. Only records that still describe THIS launch are
+# removed: a newer codex3 run of the same Session may own them now.
+function Complete-CodexExit {
+
+    $status["state"] =
+        "Exited"
+
+    $status["lastActivity"] =
+        "Local Codex process exited (detected by Observer)"
+
+
+    if (-not $LaunchId) {
+        return
+    }
+
+
+    $launchFile =
+        Join-Path `
+            (Join-Path $MonitorHome "launches") `
+            "$LaunchId.json"
+
+    $launch =
+        Read-JsonFileOrNull `
+            -Path $launchFile
+
+    if (
+        $launch -and
+        [string]$launch.sessionId -eq $SessionId
+    ) {
+
+        Remove-Item `
+            -LiteralPath $launchFile `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+
+
+    $claimFile =
+        Join-Path `
+            (Join-Path $MonitorHome "claims") `
+            "$SessionId.claim"
+
+    $claim =
+        Read-JsonFileOrNull `
+            -Path $claimFile
+
+    if (
+        $claim -and
+        [string]$claim.launchId -eq $LaunchId
+    ) {
+
+        Remove-Item `
+            -LiteralPath $claimFile `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
 }
 
 
@@ -2034,6 +2198,12 @@ Write-Log "Watch-CodexSession started"
 Write-Log "SessionId=$SessionId"
 Write-Log "CODEX_HOME=$CodexHome"
 Write-Log "MonitorHome=$MonitorHome"
+Write-Log (
+    "CodexPid=$CodexPid " +
+    "CodexCreatedUtc=$CodexCreatedUtc " +
+    "LaunchId=$LaunchId" +
+    $(if ($CodexPid -le 0) { " (writer unknown: no self-exit)" } else { "" })
+)
 
 
 if (
@@ -2327,6 +2497,20 @@ try {
             (Get-Date) -ge
             $nextHeartbeat
         ) {
+
+            if (Test-CodexGone) {
+
+                Write-Log (
+                    "Codex process $CodexPid is gone; " +
+                    "Observer exiting."
+                )
+
+                Complete-CodexExit
+
+                # The finally block writes the final status.
+                break
+            }
+
 
             Refresh-ThreadName
 

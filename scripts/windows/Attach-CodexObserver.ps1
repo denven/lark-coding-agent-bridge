@@ -571,6 +571,106 @@ function Write-ProcessTreeDebug {
 
 
 # ============================================================
+# Tail of a file, as lines
+#
+# The first line of the window is usually cut mid-way and is
+# dropped. A line longer than the whole window yields nothing,
+# which callers treat as "no recent event found".
+# ============================================================
+
+$RolloutTailBytes =
+    4MB
+
+
+function Read-FileTail {
+
+    param(
+        [string]$Path,
+
+        [long]$Bytes
+    )
+
+    $stream =
+        $null
+
+    try {
+
+        $stream =
+            [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                # Codex may be appending to the rollout right now.
+                [System.IO.FileShare]::ReadWrite
+            )
+
+        $start =
+            [Math]::Max(
+                [long]0,
+                $stream.Length - $Bytes
+            )
+
+        $length =
+            [int]($stream.Length - $start)
+
+        $buffer =
+            New-Object byte[] $length
+
+        $null =
+            $stream.Seek(
+                $start,
+                [System.IO.SeekOrigin]::Begin
+            )
+
+        $read =
+            0
+
+        while ($read -lt $length) {
+
+            $n =
+                $stream.Read(
+                    $buffer,
+                    $read,
+                    $length - $read
+                )
+
+            if ($n -le 0) {
+                break
+            }
+
+            $read += $n
+        }
+
+
+        $lines =
+            [System.Text.Encoding]::UTF8.GetString(
+                $buffer,
+                0,
+                $read
+            ) -split "\r?\n"
+
+        if ($start -gt 0 -and $lines.Count -gt 0) {
+            $lines =
+                $lines |
+                Select-Object -Skip 1
+        }
+
+        return ,@($lines)
+    }
+    catch {
+
+        return ,@()
+    }
+    finally {
+
+        if ($stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
+
+# ============================================================
 # Rollout metadata
 #
 # session_meta gives us the canonical Session ID.
@@ -604,6 +704,11 @@ function Get-RolloutMetadata {
 
 
         foreach ($line in $head) {
+
+            # Cheap filter before the (slow) JSON parse.
+            if (-not $line.Contains('"session_meta"')) {
+                continue
+            }
 
             try {
                 $event =
@@ -653,15 +758,27 @@ function Get-RolloutMetadata {
 
 
         # Inspect recent events for the latest cwd.
+        #
+        # Read a byte window from the end instead of
+        # `Get-Content -Tail`: on a large rollout with
+        # megabyte-long lines, -Tail in Windows PowerShell 5.1
+        # ran for minutes (measured on a 64 MB rollout). Only
+        # small turn_context / thread_settings lines are parsed;
+        # ConvertFrom-Json on the huge lines is slow as well.
         $tail =
-            Get-Content `
+            Read-FileTail `
                 -Path $RolloutPath `
-                -Tail 200 `
-                -Encoding UTF8 `
-                -ErrorAction SilentlyContinue
+                -Bytes $RolloutTailBytes
 
 
         foreach ($line in $tail) {
+
+            if (
+                -not $line.Contains('"turn_context"') -and
+                -not $line.Contains('"thread_settings"')
+            ) {
+                continue
+            }
 
             try {
                 $event =
@@ -720,6 +837,354 @@ function Get-RolloutMetadata {
 
         return $null
     }
+}
+
+
+# ============================================================
+# Resume target
+#
+# `codex resume <id|name>` reopens an EXISTING rollout and
+# writes nothing to it until the first prompt. The activity
+# scan in Phase 2 (rollouts written after launch) therefore
+# cannot see a resumed Session for as long as the user only
+# looks at the TUI — and never, if they leave it idle.
+#
+# The command line already names the Session, so resolve it
+# directly. Anything ambiguous returns $null and Phase 2 keeps
+# its original activity matching: attaching the Observer to
+# the wrong Session would let a later handoff terminate this
+# Codex while binding a different Session to Lark.
+# ============================================================
+
+$sessionIdPattern =
+    '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+
+function Split-CommandLine {
+
+    param(
+        [string]$CommandLine
+    )
+
+    # Double-quoted segments stay whole: thread names may
+    # contain spaces.
+    $tokens =
+        @()
+
+    foreach (
+        $match in [regex]::Matches(
+            [string]$CommandLine,
+            '"([^"]*)"|(\S+)'
+        )
+    ) {
+
+        if ($match.Groups[1].Success) {
+            $tokens += $match.Groups[1].Value
+        }
+        else {
+            $tokens += $match.Groups[2].Value
+        }
+    }
+
+    return ,$tokens
+}
+
+
+function Get-ResumeSelectors {
+
+    param(
+        [string]$CommandLine
+    )
+
+    $tokens =
+        Split-CommandLine `
+            -CommandLine $CommandLine
+
+
+    # Only a `resume` after the Codex entry point is the
+    # subcommand; node.exe's own arguments come before it.
+    $codexIndex =
+        -1
+
+    for ($i = 0; $i -lt $tokens.Count; $i++) {
+
+        if (
+            $tokens[$i] -match
+            '(?i)(^|[\\/])codex(\.js|\.exe|\.cmd)?$'
+        ) {
+            $codexIndex = $i
+            break
+        }
+    }
+
+    if ($codexIndex -lt 0) {
+        return @()
+    }
+
+
+    $resumeIndex =
+        -1
+
+    for ($i = $codexIndex + 1; $i -lt $tokens.Count; $i++) {
+
+        if ($tokens[$i] -ieq "resume") {
+            $resumeIndex = $i
+            break
+        }
+    }
+
+    # Also covers a bare `resume` (interactive picker): nothing
+    # follows it.
+    if (
+        $resumeIndex -lt 0 -or
+        $resumeIndex -ge ($tokens.Count - 1)
+    ) {
+        return @()
+    }
+
+
+    # Positional tokens only. A flag's value (e.g. a model name)
+    # may still slip through; it just fails to resolve and the
+    # next token is tried.
+    return @(
+        $tokens[($resumeIndex + 1)..($tokens.Count - 1)] |
+        Where-Object {
+            $_ -and
+            -not $_.StartsWith("-")
+        }
+    )
+}
+
+
+function Find-RolloutById {
+
+    param(
+        [string]$SessionId
+    )
+
+    return (
+        Get-ChildItem `
+            $sessionRoot `
+            -Recurse `
+            -Filter "rollout-*$SessionId.jsonl" `
+            -File `
+            -ErrorAction SilentlyContinue |
+        Sort-Object `
+            LastWriteTimeUtc `
+            -Descending |
+        Select-Object -First 1
+    )
+}
+
+
+function Find-SessionIdsByThreadName {
+
+    param(
+        [string]$ThreadName
+    )
+
+    $indexPath =
+        Join-Path `
+            $CodexHome `
+            "session_index.jsonl"
+
+    if (-not (Test-Path $indexPath)) {
+        return @()
+    }
+
+
+    # Append-only log: each Session's LATEST record carries its
+    # current name (renames append a new line).
+    $latest =
+        @{}
+
+    $order =
+        0
+
+    foreach (
+        $line in [System.IO.File]::ReadLines(
+            $indexPath,
+            [System.Text.Encoding]::UTF8
+        )
+    ) {
+
+        $order++
+
+        try {
+            $record =
+                $line |
+                ConvertFrom-Json
+        }
+        catch {
+            continue
+        }
+
+        if (-not $record.id) {
+            continue
+        }
+
+
+        $at =
+            [datetimeoffset]::MinValue
+
+        try {
+            $at =
+                [datetimeoffset]::Parse(
+                    [string]$record.updated_at
+                )
+        }
+        catch {
+        }
+
+
+        $id =
+            [string]$record.id
+
+        $previous =
+            $latest[$id]
+
+        if (
+            -not $previous -or
+            $at -gt $previous.At -or
+            (
+                $at -eq $previous.At -and
+                $order -gt $previous.Order
+            )
+        ) {
+
+            $latest[$id] =
+                [pscustomobject]@{
+                    Name  = [string]$record.thread_name
+                    At    = $at
+                    Order = $order
+                }
+        }
+    }
+
+
+    $wanted =
+        $ThreadName.Trim()
+
+    return @(
+        $latest.GetEnumerator() |
+        Where-Object {
+            $_.Value.Name -and
+            $_.Value.Name.Trim() -ieq $wanted
+        } |
+        ForEach-Object {
+            $_.Key
+        }
+    )
+}
+
+
+function Resolve-ResumeTarget {
+
+    param(
+        [string]$CommandLine
+    )
+
+    foreach (
+        $selector in (
+            Get-ResumeSelectors `
+                -CommandLine $CommandLine
+        )
+    ) {
+
+        if ($selector -match $sessionIdPattern) {
+
+            $sessionId =
+                $selector.ToLowerInvariant()
+
+            $via =
+                "Session ID"
+        }
+        else {
+
+            $ids =
+                @(
+                    Find-SessionIdsByThreadName `
+                        -ThreadName $selector
+                )
+
+            if ($ids.Count -eq 0) {
+                continue
+            }
+
+            # Which of several same-named Sessions Codex picked
+            # cannot be known from here, so do not guess.
+            if ($ids.Count -gt 1) {
+
+                Write-Log (
+                    "Resume thread name '$selector' matches " +
+                    "$($ids.Count) Sessions; falling back to activity matching."
+                )
+
+                return $null
+            }
+
+            $sessionId =
+                $ids[0]
+
+            $via =
+                "thread name '$selector'"
+        }
+
+
+        $file =
+            Find-RolloutById `
+                -SessionId $sessionId
+
+        if (-not $file) {
+
+            Write-Log (
+                "Resume target $sessionId ($via) has no rollout file; " +
+                "falling back to activity matching."
+            )
+
+            return $null
+        }
+
+
+        $meta =
+            Get-RolloutMetadata `
+                -RolloutPath $file.FullName
+
+        if (-not $meta) {
+            return $null
+        }
+
+
+        # Keep Phase 2's cwd rule: the Session must belong to the
+        # directory this codex3 was started in.
+        if (
+            (Normalize-Path $meta.Cwd) -ne
+            $targetCwd
+        ) {
+
+            Write-Log (
+                "Resume target $sessionId ($via) belongs to " +
+                "$($meta.Cwd), not this directory; falling back to activity matching."
+            )
+
+            return $null
+        }
+
+
+        Write-Log (
+            "Resume target from command line ($via): " +
+            $meta.SessionId
+        )
+
+        return (
+            [pscustomobject]@{
+                File = $file
+                Meta = $meta
+            }
+        )
+    }
+
+    return $null
 }
 
 
@@ -1208,6 +1673,14 @@ Write-Log (
     "Codex process found. Waiting for matching Session/rollout."
 )
 
+# Resolved once: the command line cannot change.
+$resumeTarget =
+    Resolve-ResumeTarget `
+        -CommandLine $codexProcess.CommandLine
+
+$claimRefusedLogged =
+    $false
+
 $nextProgressLog =
     (Get-Date).AddSeconds(
         $ProgressLogSeconds
@@ -1259,35 +1732,54 @@ while ($true) {
     # --------------------------------------------------------
     # Candidate rollout files
     #
-    # A resumed Session may use an older rollout file, but its
-    # LastWriteTimeUtc will move forward when Codex writes new
-    # activity. Therefore filter on LastWriteTimeUtc rather
-    # than creation time.
+    # When the command line named the Session, it is the ONLY
+    # candidate: never fall back to some other rollout that
+    # happens to be active in the same directory.
+    #
+    # Otherwise, a resumed Session may use an older rollout
+    # file, but its LastWriteTimeUtc will move forward when
+    # Codex writes new activity. Therefore filter on
+    # LastWriteTimeUtc rather than creation time.
     # --------------------------------------------------------
 
-    $candidates =
-        Get-ChildItem `
-            $sessionRoot `
-            -Recurse `
-            -Filter "rollout-*.jsonl" `
-            -File `
-            -ErrorAction SilentlyContinue |
-        Where-Object {
+    if ($resumeTarget) {
 
-            $_.LastWriteTimeUtc -ge
-            $launchUtc.AddSeconds(-5)
+        $candidates =
+            @($resumeTarget.File)
+    }
+    else {
 
-        } |
-        Sort-Object `
-            LastWriteTimeUtc `
-            -Descending
+        $candidates =
+            Get-ChildItem `
+                $sessionRoot `
+                -Recurse `
+                -Filter "rollout-*.jsonl" `
+                -File `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+
+                $_.LastWriteTimeUtc -ge
+                $launchUtc.AddSeconds(-5)
+
+            } |
+            Sort-Object `
+                LastWriteTimeUtc `
+                -Descending
+    }
 
 
     foreach ($file in $candidates) {
 
+        # A resume target's metadata is already known; re-reading
+        # a large rollout every poll would be wasted work.
         $meta =
-            Get-RolloutMetadata `
-                -RolloutPath $file.FullName
+            if ($resumeTarget) {
+                $resumeTarget.Meta
+            }
+            else {
+                Get-RolloutMetadata `
+                    -RolloutPath $file.FullName
+            }
 
 
         if (-not $meta) {
@@ -1330,6 +1822,22 @@ while ($true) {
 
 
         if (-not $claimed) {
+
+            # Otherwise this loop would wait silently: say why once.
+            if (
+                $resumeTarget -and
+                -not $claimRefusedLogged
+            ) {
+
+                Write-Log (
+                    "Session $sessionId is held by a live launch or a " +
+                    "running Observer; waiting for it to be released."
+                )
+
+                $claimRefusedLogged =
+                    $true
+            }
+
             continue
         }
 
@@ -1344,13 +1852,19 @@ while ($true) {
         # Start Observer
         # ====================================================
 
+        # CodexPid / CodexCreatedUtc / LaunchId let the Observer exit
+        # by itself when this Codex dies without codex3's cleanup
+        # (e.g. the terminal closed with the X button).
         $observerArgs =
             "-NoProfile " +
             "-ExecutionPolicy Bypass " +
             "-File `"$ObserverScript`" " +
             "-SessionId `"$sessionId`" " +
             "-CodexHome `"$CodexHome`" " +
-            "-MonitorHome `"$monitorHome`""
+            "-MonitorHome `"$monitorHome`" " +
+            "-CodexPid $($codexProcess.ProcessId) " +
+            "-CodexCreatedUtc `"$($codexProcess.CreatedUtc.ToString("o"))`" " +
+            "-LaunchId `"$LaunchId`""
 
 
         try {

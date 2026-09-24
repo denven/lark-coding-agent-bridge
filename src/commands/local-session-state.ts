@@ -722,6 +722,47 @@ export function getHandoffState(
     };
   }
 
+  /*
+   * The Codex this launch recorded is provably gone
+   * ('gone', not EPERM), yet the Observer still
+   * heartbeats: a stale Observer left behind when the
+   * codex3 terminal closed without its cleanup.
+   *
+   * No release can succeed (there is nothing to
+   * terminate and its Release Agent exits with Codex),
+   * so offer no Handoff. Deliberately NOT reported as
+   * detached: while that Observer holds a fresh
+   * heartbeat, a new codex3 run of this Session cannot
+   * claim it, and would be invisible here — treating
+   * the Session as free could let Lark become a second
+   * writer.
+   */
+  if (
+    launch &&
+    observerFresh &&
+    processState(
+      launch.codexRootPid,
+    ) === 'gone'
+  ) {
+    return {
+      code: 'needs-validation',
+
+      windowsActive: true,
+
+      observerFresh,
+      observerAlive,
+      writerAlive,
+      releaseAgentAlive,
+
+      reason:
+        `Codex exited; stale Observer (pid ${observerPid ?? '?'}) still running`,
+
+      transferable: false,
+
+      launch,
+    };
+  }
+
   const activityState =
     String(
       status.state ?? '',
@@ -786,6 +827,14 @@ export function getHandoffState(
     };
   }
 
+  /*
+   * No launch mapping: this Codex was never attached by
+   * codex3 (started before the attach mechanism, by hand,
+   * or an attach that never completed). Codex Release
+   * Agents are per Session and there is none for it, and
+   * Release-CodexSession.ps1 refuses with
+   * LAUNCH_MAPPING_NOT_FOUND — a handoff can only fail.
+   */
   if (!launch) {
     return {
       code:
@@ -800,6 +849,8 @@ export function getHandoffState(
 
       reason:
         'Launch mapping unavailable',
+
+      transferable: false,
     };
   }
 
@@ -824,6 +875,9 @@ export function getHandoffState(
 
       reason:
         'Release Agent not recorded',
+
+      // Without an agent nobody picks up the release request.
+      transferable: false,
 
       launch,
     };
