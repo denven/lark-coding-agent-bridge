@@ -243,6 +243,13 @@ Codex 正常运行
 但 /local-status 找不到 Session
 ```
 
+Attach 如何识别 `codex3` 启动的会话：
+
+- `codex3`（新会话）：以当前目录下第一个被写出的 rollout 识别。
+- `codex3 resume <Session-ID>` 或 `codex3 resume <thread 名称>`：直接从命令行识别，不需要先输入内容。名称会在同一个 `CODEX_HOME` 的 `session_index.jsonl` 中查找，只有唯一对应一个会话时才使用；否则请用 Session ID。
+
+Attach 启动的 Observer 会在它的 Codex 退出后自行结束，即使终端是直接关掉的。
+
 ---
 
 ## 7. 建议的 PowerShell profile

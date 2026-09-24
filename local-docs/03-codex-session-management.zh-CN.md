@@ -87,14 +87,11 @@ flowchart TD
 → 全局 inventory + Use / Handoff / Hand Back Action
 ```
 
-Action 的显示名称与真正执行目标严格分开：
+按钮只写动作和方向（`Use in Lark`、`Handoff to Lark`、`Hand Back to Windows`），由上方编号行标明是哪个 Session，hover 提示重复其标题。显示与执行目标严格分开：
 
 ```text
-显示：唯一 Thread Name
-      Thread Name 重名时 + short Session ID
-      没有 Thread Name 时使用 short Session ID
-
-执行：exact full Session ID
+显示：编号行 —— Thread Name，没有名称时用 short Session ID
+执行：按钮里携带的 exact full Session ID
 ```
 
 Project Name 和 cwd 只是辅助 metadata，不能作为 Action identity，因为多个 Session 完全可能共享同一个项目目录。这个规则在手机端尤其重要：用户看到的是可读按钮，不需要手工输入长 Session ID，而底层仍通过完整 Session ID 精确定位。Lark Web / Desktop 还可以显示 `hover_tips`；Mobile 主要依赖按钮本身的文字。
@@ -1006,9 +1003,11 @@ process
 cwd
 launch time
 rollout session_meta
+command line  （resume <Session-ID | 唯一的 thread 名称>）
+session_index （thread 名称 → Session ID）
 ```
 
-发现 Session。
+发现 Session：`codex3 resume` 立即识别，新会话在第一次写入 rollout 时识别（见下文「Codex attach 与 Observer 生命周期」）。
 
 ### Observer
 
@@ -1016,9 +1015,10 @@ rollout session_meta
 
 ```text
 rollout + session_index
+它的 Codex PID + 创建时间
 ```
 
-生成轻量 status projection。
+生成轻量 status projection，并在它的 Codex 退出后自行结束。
 
 ### `/session list`
 
@@ -1236,6 +1236,68 @@ UAC 确认框启动管理员进程，用户在手机上时无人能点。`codex3
 > 此修复之前，Codex 的 `/session use` 与 handoff 只写 `sessions.json`，续接实际
 > 从未生效——日志中没有任何一次 run 续接过被接管的 Windows 会话，下一条消息
 > 都开了新 thread。
+
+Handoff 与 `/session use` 的结果卡片都会显示 Last Response（handoff 标为
+「Last Windows Response」），附带 Hand Back 按钮；handback 不需要带回任何内容，
+因为 Lark 里的轮次也写进了同一台机器上的 rollout / transcript。它只是给人看的，
+模型任何方向都从 rollout / transcript 读取完整历史。
+
+### Codex attach 与 Observer 生命周期
+
+本节记录的两个实测问题，都会让 Codex 会话的 handoff 状态与事实不符。
+
+**1. 恢复的会话不会被 attach。** Attach 原本只认「启动之后被写入的 rollout」。
+`codex3 resume` 重新打开的是旧 rollout，在第一次输入之前什么都不写，所以只 resume
+不输入的会话永远不会被 attach：没有 launch mapping，没有 Release Agent，Windows
+上的 writer 对 bridge 不可见。实测案例：`codex3 resume Online-Web-Forms-Htmls`
+的 attach 一直停在「still waiting for matching rollout」，这个会话当时仍绑定在
+Lark，形成了没人察觉的双 writer。
+
+修复（`Attach-CodexObserver.ps1` 的 `Resolve-ResumeTarget`）：
+
+- 从 Codex 命令行里取 `resume` 之后的参数：UUID 直接使用；名称经
+  `session_index.jsonl` 解析（取每个 id 最新的一条记录）。
+- **名称只在唯一对应一个会话时才使用**。实测 index 中 "Show git status" 对应 6 个
+  会话；猜错会把 Observer 挂到错误的会话上，之后的 handoff 就会终止这个 Codex、
+  却把另一个会话绑定到 Lark。
+- 会话的 cwd 必须与 `codex3` 的启动目录一致；否则、以及 `resume --last` 和交互式
+  选择器，都退回原来的活动匹配。
+- 一旦命令行确定了会话，就只认领它，绝不退回到同目录下碰巧活跃的其他 rollout。
+
+**2. `Get-Content -Tail` 在大 rollout 上会卡住。** `Get-RolloutMetadata` 原本用
+`Get-Content -Tail 200` 读尾部。在一个 64 MB、单行最长 1.27 MB 的 rollout 上，它
+运行超过 5 分钟没有结束（读头部 100 行只需 39 ms）。现在改为按字节读取最后 4 MB，
+且只对含 `turn_context` / `thread_settings` / `session_meta` 的行做 JSON 解析。
+新旧实现在 12 个 rollout 上结果完全一致，快 10–30 倍。
+
+**3. 遗留 Observer。** Observer 只按 Session ID 监视 rollout，并不知道自己的 Codex
+是否还活着；Codex 退出时由 `codex3` 的 finally 块调用 `Stop-CodexObserver.ps1`
+清理。终端被直接关闭时 finally 不会运行，Observer 就一直写「Waiting」心跳，会话
+看起来仍由 Windows 持有并可以 handoff——实测 `01a0bdff` 的 Codex、终端和 Release
+Agent 都已不在，只剩 Observer。
+
+修复：
+
+- Attach 启动 Observer 时传入 `-CodexPid`、`-CodexCreatedUtc`、`-LaunchId`。
+  Observer 每次心跳检查自己的 Codex；进程不在、或 PID 被复用（创建时间不符），就把
+  状态标为 Exited，只删除仍属于这次启动的 mapping 和 claim，然后退出——与
+  `Stop-CodexObserver.ps1` 做的事相同。手动启动的 Observer（没有 PID）保持原行为。
+- 对已经存在的遗留 Observer，bridge 在「心跳新鲜、但 mapping 记录的 Codex 确定已
+  退出（gone，而不是 EPERM）」时判为 **Needs validation · Codex exited; stale
+  Observer (pid N) · 不可接管**。刻意不判为 Detached：这个 Observer 仍持有新鲜心跳，
+  会让同一会话新的 `codex3` attach 认领失败，此时可能存在 bridge 看不见的 writer，
+  判为 Detached 就可能让 Lark 成为第二个 writer。
+
+**不可接管的 Codex 状态**（`HandoffState.transferable === false`）：
+
+| 原因 | 为什么 handoff 必然失败 |
+|---|---|
+| Launch mapping unavailable | Codex Release Agent 是按会话启动的，没有 attach 就没有 agent 接收请求；`Release-CodexSession.ps1` 也会以 `LAUNCH_MAPPING_NOT_FOUND` 退出 |
+| Release Agent not recorded | 没有 agent 接收释放请求，只会超时 |
+| Codex exited; stale Observer | 没有可终止的进程，它的 Release Agent 已随 Codex 退出 |
+
+「Observer heartbeat stale」仍提供 Handoff：它可能在几秒内恢复，由释放链做权威校验。
+卡片分类、按钮与 `/session handoff` 都遵循 `transferable`，后者会给出原因和下一步操作。
 
 ---
 
@@ -1510,9 +1572,9 @@ forensics
 
 ### 本项目相关文档
 
-- [Codex 第三方 API Key](./01-codex-third-party-api-key.md)
-- [Lark / Bridge / Codex 架构](./02-lark-bridge-codex-architecture.md)
-- [根 README](../README.md)
+- [Codex 第三方 API Key](./01-codex-third-party-api-key.zh-CN.md)
+- [Lark / Bridge / Codex / Claude Code 架构](./02-lark-bridge-codex-architecture.zh-CN.md)
+- [根 README](../README.zh-CN.md)
 
 ---
 

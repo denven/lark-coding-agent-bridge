@@ -80,19 +80,14 @@ The interactive cards are especially useful on a phone:
 
 - `/lark status` shows the current Lark scope and provides quick actions such as **New Lark Session**, **Resume Lark Session**, **Workspace**, and **Help**.
 - `/windows status` shows Windows Codex sessions and adds a **Release** action for sessions that are safe to release.
-- `/session list` shows session ownership and exposes context-aware actions: **Use in this Lark**, **Handoff to this Lark**, or **Hand Back to Windows**.
+- `/session list` shows session ownership and exposes context-aware actions: **Use in Lark**, **Handoff to Lark**, or **Hand Back to Windows**.
 - Lark Web/Desktop can additionally show button `hover_tips`; Lark Mobile relies on the button labels themselves.
 
-Action labels are optimized for readability, while execution remains unambiguous:
+Buttons name only the action and its direction (**Use in Lark**, **Handoff to Lark**, **Hand Back to Windows**): the numbered row above them already identifies the Session, and short labels keep two buttons per line on a phone. The hover tip repeats the Session title. Execution stays unambiguous:
 
 ```text
-Display identity
-Thread Name
-→ duplicate Thread Name + short Session ID
-→ short Session ID when no Thread Name exists
-
-Execution identity
-ALWAYS the exact full Session ID
+Display identity   the numbered row: Thread Name (short Session ID when unnamed)
+Execution identity ALWAYS the exact full Session ID carried in the button payload
 ```
 
 Project names and working directories are shown as metadata, but are **not** used as the identity of an action because several sessions can share the same project or cwd.
@@ -114,7 +109,7 @@ Project names and working directories are shown as metadata, but are **not** use
 </tr>
 </table>
 
-This makes it possible to inspect and switch Codex ownership remotely from Lark Mobile or Lark Web while keeping the Windows/Lark single-writer rule explicit.
+This makes it possible to inspect and switch session ownership remotely from Lark Mobile or Lark Web while keeping the Windows/Lark single-writer rule explicit.
 
 ## Claude Code sessions
 
@@ -139,7 +134,9 @@ Claude Code needs no Observer to track status: it keeps its own live-process reg
 | Title | `custom-title.json` → latest `ai-title` → first prompt |
 | Running on Windows | `~/.claude/sessions/<pid>.json` — `status: idle / busy`, `entrypoint: cli` for a terminal window |
 
-A window that has not been sent anything yet has no transcript; it is listed from the registry as **No conversation yet** and cannot be handed off.
+A window that has not been sent anything yet has no transcript; it is listed from the registry as **No conversation yet** and cannot be handed off. `claude -p` runs — including the bridge's own Lark runs — register too (as `entrypoint: sdk-cli`) and are never treated as Windows writers.
+
+`/help` follows the profile: on a Claude bot it describes Claude Code sessions and omits `/windows`, and `/windows` / `/local-status` / `/local-release` reply that they apply to Codex bots only, pointing to `/session list` / `/session handoff`.
 
 ### Handoff and the Claude Release Agent
 
@@ -186,7 +183,8 @@ Start Codex on Windows:
 
 ```powershell
 cd E:\AI_Tools\codex\AcuPilot
-codex3
+codex3                       # new session
+codex3 resume <Session-ID>   # or a thread name that only one session uses
 ```
 
 Inspect Windows sessions from Lark:
@@ -241,6 +239,36 @@ Only one logical writer should own the session at a time.
 
 The UI can use a Thread Name for readability, but all destructive or ownership-changing actions target the **full Session ID** internally.
 
+Binding a session to a Lark scope (Use / Handoff) writes the bridge's session catalog as well as `sessions.json`, because that catalog is what the next Lark message resumes from; Hand Back archives the catalog entry so Lark stops resuming it.
+
+## What a transfer carries
+
+| Transfer | Shows the Last Response? | Why |
+|---|---|---|
+| Windows → Lark (**Handoff to Lark**) | Yes — "Last Windows Response" on the result card | Where the Windows conversation left off |
+| Detached → Lark (**Use in Lark**) | Yes — "Last Response" on the result card | A Detached session was usually last used on Windows |
+| Lark → Windows (**Hand Back to Windows**) | Not needed | Lark turns run on the same Windows machine and are written to the same rollout / transcript, so `codex3 resume` / `claude --resume` already shows them |
+
+The Last Response is shown to the person only. The model never needs it carried over: a resumed session reads its full history from the rollout / transcript in either direction.
+
+## Handoff states — what they mean and what to do
+
+The `/session list` card shows a **Handoff** line for sessions running on Windows. A state marked *not transferable* gets no Handoff button, and `/session handoff` refuses it with the same explanation.
+
+| State | Agent | Meaning | What to do |
+|---|---|---|---|
+| 🟢 Ready | both | Idle Windows writer, fully identified | **Handoff to Lark** |
+| 🔵 Busy · … | both | The Windows writer is working | Wait until it is idle |
+| ⚪ Detached | both | No Windows writer and no Lark owner | **Use in Lark** |
+| 🟡 Observer heartbeat stale | Codex | The Observer has not reported for over 30 s | Usually recovers; Handoff is still offered and the release chain re-validates |
+| 🟡 Launch mapping unavailable *(not transferable)* | Codex | This Codex was never attached by `codex3` (started before the attach mechanism, by hand, or the attach did not finish), so it has no Release Agent | Exit it on Windows, then **Use in Lark**; open sessions with `codex3` / `codex3 resume` from now on. A hand-started Observer keeps running and must be stopped too |
+| 🟡 Release Agent not recorded *(not transferable)* | Codex | Same cause: nothing can release this writer | Same as above |
+| 🟡 Codex exited; stale Observer (pid N) *(not transferable)* | Codex | The `codex3` terminal was closed without its cleanup and its Observer outlived Codex | `Stop-Process N` (in an administrator PowerShell if `codex3` ran elevated); the session then becomes Detached. Observers started by the current scripts exit on their own |
+| 🟡 Running as administrator — Claude release agent not running *(not transferable)* | Claude | Elevated window; the non-elevated bridge cannot release it | Register the Claude Release Agent ([below](#normal-vs-administrator-powershell)), or exit it on Windows and **Use in Lark** |
+| 🟡 No conversation yet *(not transferable)* | Claude | Open window that has not been sent anything | Nothing to resume — just talk to the bot in Lark |
+| 🟡 Open in *client* — close it there *(not transferable)* | Claude | Running in an IDE or other client, not a terminal | Close it there, then **Use in Lark** |
+| 🟡 Unknown status / Process identity unavailable *(not transferable)* | Claude | Cannot confirm it is safe to terminate | Exit it on Windows, then **Use in Lark** |
+
 ## Windows monitoring layer
 
 ```text
@@ -264,6 +292,30 @@ Runtime data is stored under:
 %USERPROFILE%\.claude-monitor\   Claude Release Agent requests / results / heartbeat
 ```
 
+How `codex3` attaches a session:
+
+- `codex3` (a new session) is identified by the first rollout it writes in the current directory.
+- `codex3 resume <Session-ID>` and `codex3 resume <thread name>` are identified **immediately** from the command line — before anything is typed. A thread name is used only when exactly one session carries it; a name shared by several sessions, `resume --last`, or the interactive picker falls back to the first-write matching, so use the Session ID to be certain.
+- The Observer exits by itself when its Codex exits, even if the terminal was closed with the X button, and removes that launch's mapping and claim.
+
+Attach logs are in `%USERPROFILE%\.codex-monitor\logs\attach-<launch-id>.log`; `Resume target from command line` confirms an immediate match.
+
+## Normal vs. administrator PowerShell
+
+The bridge itself always runs as a **LIMITED** (non-elevated) scheduled task — `lark-channel-bridge start` only runs that task, so starting it from an administrator terminal does not elevate it. Windows does not let a non-elevated process inspect or terminate an elevated one, which is what the release agents are for.
+
+| Task | Where to run it | Notes |
+|---|---|---|
+| `.\scripts\windows\Register-ClaudeReleaseAgent.ps1` (and `-Unregister`) | **Administrator PowerShell** — the script refuses otherwise | Once. Registers `\LarkChannelBridge.ClaudeReleaseAgent`, a `/RL HIGHEST` logon task, and starts it. Needed only if you start Claude from an administrator terminal |
+| `Stop-Process <pid>` for a stale Observer | **Administrator PowerShell** if `codex3` ran elevated | An elevated process can only be stopped from an elevated shell |
+| `codex3`, `codex3 resume …` | Either | If elevated, its Observer and Release Agent are elevated too, and Codex handoff still works — its own Release Agent does the terminating |
+| `claude` | Either | Elevated windows need the Claude Release Agent for handoff; windows from a normal terminal do not |
+| `.\scripts\windows\Install-CodexBridgeScripts.ps1` | Either | Copies the scripts to `%USERPROFILE%\Scripts` |
+| `lark-channel-bridge start / stop / status` | Either | The bridge runs LIMITED regardless |
+| `pnpm install / test / build`, `npm install -g .` | Normal | — |
+
+`whoami /groups | findstr "Mandatory Label"` shows `High Mandatory Level` in an elevated shell.
+
 ## Build and install
 
 ```powershell
@@ -286,11 +338,22 @@ lark-channel-bridge start --profile claude
 
 Do not replace the local build with `npm install -g lark-channel-bridge@latest`; that installs the upstream registry package and removes the local session-management extensions.
 
+After updating `scripts/windows/`, run `Install-CodexBridgeScripts.ps1` again: `codex3` and the release agents run the installed copies in `%USERPROFILE%\Scripts`, and already-running Observers keep the version they started with.
+
+The test suite runs in UTC (`vitest.config.ts`) because some tests pin the clock to midnight UTC while log files are named by local date.
+
+## Known limitations
+
+- **Card buttons inside a message thread.** In a group, a typed command inside a thread belongs to that thread's Lark scope, but a card button clicked inside the thread resolves to the group's main chat scope. A session handed off or used by a button click is therefore bound to the main chat. Prefer typed commands inside threads, or use the buttons from the main chat area.
+- **Codex sessions not attached by `codex3`** (started before the attach mechanism or by hand) cannot be handed off; exit them on Windows and use **Use in Lark**.
+- **Handoff terminates the Windows window.** The conversation is intact on disk, but an unsent draft in the terminal prompt is lost. After a forced Claude exit the terminal may print stray escape sequences such as `[I[` on focus changes; close that tab.
+- **One bot per agent.** A profile runs either Codex or Claude Code; manage the other kind from its own bot.
+
 ## Documentation
 
 - [Local documentation index](./local-docs/README.md)
 - [Third-party Codex API provider setup](./local-docs/01-codex-third-party-api-key.md)
-- [Lark / Bridge / Codex architecture](./local-docs/02-lark-bridge-codex-architecture.md)
+- [Lark / bridge / Codex / Claude Code architecture](./local-docs/02-lark-bridge-codex-architecture.md)
 - [Codex / Claude Code session management](./local-docs/03-codex-session-management.md)
 
 ## Upstream and attribution

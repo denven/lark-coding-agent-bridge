@@ -205,6 +205,13 @@ Codex works normally
 but /local-status cannot find the session
 ```
 
+How Attach identifies the session `codex3` started:
+
+- `codex3` (new session): the first rollout written in the current directory.
+- `codex3 resume <Session-ID>` or `codex3 resume <thread name>`: straight from the command line, before anything is typed. A thread name is looked up in `session_index.jsonl` under the same `CODEX_HOME`, and used only if exactly one session carries it; otherwise use the Session ID.
+
+The Observer that Attach starts exits by itself when its Codex exits, even if the terminal is closed with the X button.
+
 ---
 
 ## 7. PowerShell Profile

@@ -87,14 +87,11 @@ The local bridge now exposes Session management through interactive Lark cards, 
 → global inventory + Use / Handoff / Hand Back actions
 ```
 
-Action labels are human-readable, but execution remains Session-ID based:
+Buttons carry only the action and its direction (`Use in Lark`, `Handoff to Lark`, `Hand Back to Windows`); the numbered row above identifies the Session and the hover tip repeats its title. Execution remains Session-ID based:
 
 ```text
-Display: unique Thread Name
-         duplicate Thread Name + short Session ID
-         short Session ID when unnamed
-
-Target:  exact full Session ID
+Display: the numbered row — Thread Name, or a short Session ID when unnamed
+Target:  exact full Session ID in the button payload
 ```
 
 Project name and cwd are metadata only and must not be used as action identities because several Sessions can share the same project directory. This distinction is especially important on mobile, where buttons replace long manual selectors. Lark Web/Desktop can additionally show `hover_tips`; mobile clients rely on the visible button text.
@@ -955,9 +952,11 @@ process
 cwd
 launch time
 rollout session_meta
+command line  (resume <Session-ID | unique thread name>)
+session_index (thread name → Session ID)
 ```
 
-to discover a persistent session.
+to discover a persistent session — immediately for `codex3 resume`, on the first rollout write for a new session (see *Codex attach and Observer lifecycle* below).
 
 ### Observer
 
@@ -965,9 +964,10 @@ Uses:
 
 ```text
 rollout + session_index
+its Codex PID + creation time
 ```
 
-to build a lightweight status projection.
+to build a lightweight status projection, and exits when its Codex exits.
 
 ### `/session list`
 
@@ -1049,6 +1049,72 @@ directly, so `Register-ClaudeReleaseAgent.ps1` registers a `/RL HIGHEST`
 Verified from a Medium-integrity process: with the agent running, an elevated
 window turns Ready, and releasing a disposable elevated window returned
 `OK|RELEASED` in about 2.3 s.
+
+**Transfers and Last Response.** The handoff and `/session use` result cards both
+show the Last Response ("Last Windows Response" for a handoff) with a Hand Back
+button. Handback carries nothing back: Lark turns are written to the same
+rollout / transcript on the same machine. It is display-only — the model reads
+the full history from the rollout / transcript in either direction.
+
+### Codex attach and Observer lifecycle
+
+Two measured problems made Codex handoff states disagree with reality.
+
+**1. Resumed sessions were never attached.** Attach matched only rollouts
+*written after launch*. `codex3 resume` reopens an old rollout and writes
+nothing until the first prompt, so an idle resume was never attached — no launch
+mapping, no Release Agent, and a Windows writer invisible to the bridge. Real
+case: the attach for `codex3 resume Online-Web-Forms-Htmls` sat at "still waiting
+for matching rollout" while that session was still bound to Lark — an unnoticed
+second writer.
+
+Fix (`Resolve-ResumeTarget` in `Attach-CodexObserver.ps1`): take the argument
+after `resume` from the Codex command line — a UUID directly, a name through
+`session_index.jsonl` (latest record per id). **A name is used only when exactly
+one session carries it**: the real index has "Show git status" on six sessions,
+and a wrong guess would attach the Observer to the wrong session, so a later
+handoff would terminate this Codex while binding another session to Lark. The
+session's cwd must match the launch directory; otherwise — and for
+`resume --last` or the picker — the original activity matching applies. Once the
+command line names a session, only that session is claimed.
+
+**2. `Get-Content -Tail` hung on large rollouts.** `Get-RolloutMetadata` read the
+tail with `Get-Content -Tail 200`; on a 64 MB rollout with lines up to 1.27 MB it
+ran for over five minutes (the 100-line head read took 39 ms). It now reads the
+last 4 MB as bytes and JSON-parses only lines that can matter. Old and new
+agreed on all 12 rollouts compared, 10–30× faster.
+
+**3. Stale Observers.** An Observer watched only its Session ID's rollout, not
+whether its Codex was alive; cleanup relied on `codex3`'s finally block calling
+`Stop-CodexObserver.ps1`, which never runs when the terminal is closed with the X
+button. The Observer then heartbeated "Waiting" forever and the session looked
+Windows-owned and handoff-ready (`01a0bdff`: Codex, terminal, and Release Agent
+all gone, Observer alive).
+
+Fix: Attach passes `-CodexPid`, `-CodexCreatedUtc`, and `-LaunchId`; on each
+heartbeat the Observer checks its Codex, and if it is gone or its PID was reused
+(creation time differs) it marks the status Exited, removes only this launch's
+mapping and claim — what `Stop-CodexObserver.ps1` does — and exits. Observers
+started by hand (no PID) keep the old behaviour. For Observers that already
+outlived their Codex, the bridge reports **Needs validation · Codex exited; stale
+Observer (pid N)**, *not transferable*, when the heartbeat is fresh but the
+recorded Codex is provably gone (not EPERM). Deliberately not Detached: that
+Observer blocks a new `codex3` attach of the session, so a writer the bridge
+cannot see may exist.
+
+Codex states that are *not transferable* (`HandoffState.transferable === false`),
+and why a handoff could only fail:
+
+| Reason | Why |
+|---|---|
+| Launch mapping unavailable | Codex Release Agents are per session; without an attach there is none, and `Release-CodexSession.ps1` exits with `LAUNCH_MAPPING_NOT_FOUND` |
+| Release Agent not recorded | Nothing picks up the release request |
+| Codex exited; stale Observer | Nothing to terminate; its Release Agent exited with Codex |
+
+"Observer heartbeat stale" still offers Handoff — it can recover within seconds,
+and the release chain validates authoritatively. Card categories, buttons, and
+`/session handoff` all honour `transferable`; the command explains the reason and
+the next step.
 
 ---
 
@@ -1301,9 +1367,9 @@ Before implementing a feature, ask:
 
 ### Project Documentation
 
-- [Third-Party Codex API Key](./01-codex-third-party-api-key.en.md)
-- [Lark / Bridge / Codex Architecture](./02-lark-bridge-codex-architecture.en.md)
-- [Root README](../README.en.md)
+- [Third-Party Codex API Key](./01-codex-third-party-api-key.md)
+- [Lark / Bridge / Codex / Claude Code Architecture](./02-lark-bridge-codex-architecture.md)
+- [Root README](../README.md)
 
 ---
 

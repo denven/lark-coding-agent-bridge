@@ -80,19 +80,14 @@ Interactive Card 针对手机端操作做了进一步优化：
 
 - `/lark status` 查看当前 Lark scope，并提供 **New Lark Session**、**Resume Lark Session**、**Workspace**、**Help** 等快捷操作。
 - `/windows status` 查看 Windows Codex Sessions；可以安全 release 的 Session 会直接出现 **Release** 按钮。
-- `/session list` 展示 Session Owner，并根据当前 ownership 自动出现 **Use in this Lark**、**Handoff to this Lark** 或 **Hand Back to Windows**。
+- `/session list` 展示 Session Owner，并根据当前 ownership 自动出现 **Use in Lark**、**Handoff to Lark** 或 **Hand Back to Windows**。
 - Lark Web / Desktop 可以通过 `hover_tips` 查看按钮补充说明；Lark Mobile 没有 hover，因此按钮文字本身保持清晰可读。
 
-Action 的显示与真正执行使用两套身份规则：
+按钮只写动作和方向（**Use in Lark**、**Handoff to Lark**、**Hand Back to Windows**）：上方带编号的那一行已经标明了是哪个 Session，短标签也能让手机上一行放下两个按钮；hover 提示里会重复 Session 标题。真正执行时身份依然明确：
 
 ```text
-显示给用户
-Thread Name
-→ 如果 Thread Name 重名：Thread Name + short Session ID
-→ 如果没有 Thread Name：short Session ID
-
-真正执行
-始终使用 exact full Session ID
+显示身份   编号行：Thread Name（没有名称时用 short Session ID）
+执行身份   始终是按钮里携带的 exact full Session ID
 ```
 
 因此 Project Name 和 cwd 仍可以显示为辅助信息，但不会再作为 Action 的 Session 身份，因为同一个 Project / cwd 下可以同时存在多个不同 Session。
@@ -139,7 +134,9 @@ Thread Name
 | 标题 | `custom-title.json` → 最新的 `ai-title` → 第一条输入 |
 | Windows 上是否在运行 | `~/.claude/sessions/<pid>.json`：`status` 为 `idle / busy`；终端窗口的 `entrypoint` 为 `cli` |
 
-还没输入过任何内容的窗口没有 transcript，会从进程登记里列出，显示为 **No conversation yet**，不可接管。
+还没输入过任何内容的窗口没有 transcript，会从进程登记里列出，显示为 **No conversation yet**，不可接管。`claude -p`（包括 bridge 自己在 Lark 里的运行）也会登记（`entrypoint: sdk-cli`），但永远不会被当作 Windows writer。
+
+`/help` 会跟随 profile：在 Claude bot 上介绍的是 Claude Code 会话，不列出 `/windows`；在 Claude bot 上执行 `/windows` / `/local-status` / `/local-release` 会提示它们只适用于 Codex bot，并引导到 `/session list` / `/session handoff`。
 
 ### Handoff 与 Claude Release Agent
 
@@ -186,7 +183,8 @@ Windows 中启动 Codex：
 
 ```powershell
 cd E:\AI_Tools\codex\AcuPilot
-codex3
+codex3                       # 新会话
+codex3 resume <Session-ID>   # 或只属于一个会话的 thread 名称
 ```
 
 在 Lark 中查看 Windows runtime：
@@ -210,8 +208,8 @@ codex3
 并直接使用卡片中根据 ownership 自动出现的 Action：
 
 ```text
-Detached → Use in this Lark
-Windows  → Handoff to this Lark
+Detached → Use in Lark
+Windows  → Handoff to Lark
 Current Lark → Hand Back to Windows
 ```
 
@@ -249,6 +247,36 @@ claude --resume <Session-ID>
 
 UI 可以用 Thread Name 提升可读性，但所有 release / use / handoff 等真正改变 ownership 的操作，底层始终使用 **完整 Session ID**。
 
+把会话绑定到 Lark scope（Use / Handoff）时，bridge 会同时写入 session catalog 和 `sessions.json`，因为下一条 Lark 消息是从 catalog 续接的；Hand Back 会归档 catalog 条目，让 Lark 不再续接它。
+
+## 交接时会带上什么
+
+| 交接 | 是否显示 Last Response | 原因 |
+|---|---|---|
+| Windows → Lark（**Handoff to Lark**） | 是——结果卡片上的「Last Windows Response」 | 让你看到 Windows 上的对话停在哪里 |
+| Detached → Lark（**Use in Lark**） | 是——结果卡片上的「Last Response」 | Detached 的会话通常最后是在 Windows 上用的 |
+| Lark → Windows（**Hand Back to Windows**） | 不需要 | Lark 里的对话也在同一台 Windows 上执行，写进同一个 rollout / transcript，`codex3 resume` / `claude --resume` 本来就能看到 |
+
+Last Response 只是给人看的。模型任何方向都不需要额外携带：续接的会话会从 rollout / transcript 读取完整历史。
+
+## Handoff 状态：含义与处理方式
+
+`/session list` 卡片会为 Windows 上运行的会话显示一行 **Handoff** 状态。标为「不可接管」的状态不提供 Handoff 按钮，`/session handoff` 也会给出同样的说明并拒绝。
+
+| 状态 | Agent | 含义 | 处理方式 |
+|---|---|---|---|
+| 🟢 Ready | 两者 | Windows 上的 writer 空闲，且身份已完全确认 | **Handoff to Lark** |
+| 🔵 Busy · … | 两者 | Windows 上的 writer 正在工作 | 等它空闲 |
+| ⚪ Detached | 两者 | 没有 Windows writer，也没有 Lark 持有者 | **Use in Lark** |
+| 🟡 Observer heartbeat stale | Codex | Observer 超过 30 秒没有报告 | 通常会自行恢复；仍提供 Handoff，释放链会重新校验 |
+| 🟡 Launch mapping unavailable（不可接管） | Codex | 这个 Codex 没有经过 `codex3` 的 attach（在 attach 机制出现之前启动、手动启动，或 attach 没有完成），没有 Release Agent | 在 Windows 上退出它，再 **Use in Lark**；以后用 `codex3` / `codex3 resume` 打开。手动启动的 Observer 不会随之退出，需要一并结束 |
+| 🟡 Release Agent not recorded（不可接管） | Codex | 原因相同：没有进程能释放这个 writer | 同上 |
+| 🟡 Codex exited; stale Observer (pid N)（不可接管） | Codex | `codex3` 终端被直接关闭，清理步骤没有运行，Observer 比 Codex 活得久 | `Stop-Process N`（如果 `codex3` 是在管理员终端里运行的，要在管理员 PowerShell 中执行），之后会话变为 Detached。当前版本脚本启动的 Observer 会自行退出 |
+| 🟡 Running as administrator — Claude release agent not running（不可接管） | Claude | 管理员权限的窗口，普通权限的 bridge 无法释放 | 注册 Claude Release Agent（见[下文](#普通与管理员-powershell)），或在 Windows 上退出后 **Use in Lark** |
+| 🟡 No conversation yet（不可接管） | Claude | 窗口开着但还没输入过任何内容 | 没有可续接的内容，直接在 Lark 里和 bot 对话即可 |
+| 🟡 Open in *client* — close it there（不可接管） | Claude | 运行在 IDE 或其他客户端中，而不是终端 | 在那里关闭，再 **Use in Lark** |
+| 🟡 Unknown status / Process identity unavailable（不可接管） | Claude | 无法确认可以安全终止 | 在 Windows 上退出它，再 **Use in Lark** |
+
 ## Windows monitoring layer
 
 ```text
@@ -272,6 +300,30 @@ scripts/windows/
 %USERPROFILE%\.claude-monitor\   Claude Release Agent 的请求 / 结果 / 心跳
 ```
 
+`codex3` 如何识别会话：
+
+- `codex3`（新会话）：以它在当前目录写出的第一个 rollout 来识别。
+- `codex3 resume <Session-ID>` 和 `codex3 resume <thread 名称>`：**直接从命令行识别**，不需要先输入任何内容。只有当这个名称只属于一个会话时才会使用它；多个会话同名、`resume --last` 或交互式选择器都会退回到「等第一次写入」的方式，想确保立即识别就用 Session ID。
+- Observer 会在它的 Codex 退出后自行结束（即使终端是直接关掉的），并删除这次启动的 mapping 和 claim。
+
+Attach 日志在 `%USERPROFILE%\.codex-monitor\logs\attach-<launch-id>.log`，出现 `Resume target from command line` 表示已立即识别。
+
+## 普通与管理员 PowerShell
+
+bridge 本身始终以 **LIMITED**（普通权限）计划任务运行——`lark-channel-bridge start` 只是启动这个任务，所以从管理员终端启动它也不会提升权限。Windows 不允许普通进程检查或终止管理员进程，这正是两个 Release Agent 存在的原因。
+
+| 操作 | 在哪里执行 | 说明 |
+|---|---|---|
+| `.\scripts\windows\Register-ClaudeReleaseAgent.ps1`（及 `-Unregister`） | **管理员 PowerShell**，否则脚本会拒绝执行 | 只需一次。注册 `/RL HIGHEST` 的登录计划任务 `\LarkChannelBridge.ClaudeReleaseAgent` 并立即启动。只有在管理员终端里启动 Claude 时才需要 |
+| 结束遗留 Observer：`Stop-Process <pid>` | 如果 `codex3` 是以管理员身份运行的，需要**管理员 PowerShell** | 管理员进程只能从管理员 shell 结束 |
+| `codex3`、`codex3 resume …` | 都可以 | 以管理员身份运行时，它的 Observer 和 Release Agent 也是管理员权限，Codex 的 handoff 照样可用——终止动作由它自己的 Release Agent 完成 |
+| `claude` | 都可以 | 管理员窗口的 handoff 需要 Claude Release Agent；普通终端里的窗口不需要 |
+| `.\scripts\windows\Install-CodexBridgeScripts.ps1` | 都可以 | 把脚本复制到 `%USERPROFILE%\Scripts` |
+| `lark-channel-bridge start / stop / status` | 都可以 | bridge 总是以普通权限运行 |
+| `pnpm install / test / build`、`npm install -g .` | 普通 | — |
+
+在管理员 shell 中，`whoami /groups | findstr "Mandatory Label"` 会显示 `High Mandatory Level`。
+
 ## Build and install
 
 ```powershell
@@ -294,11 +346,22 @@ lark-channel-bridge start --profile claude
 
 不要使用 `npm install -g lark-channel-bridge@latest` 覆盖本地增强版，否则本地 Session 管理功能会被上游 registry 包替换。
 
+更新 `scripts/windows/` 之后要重新运行 `Install-CodexBridgeScripts.ps1`：`codex3` 和两个 Release Agent 运行的是 `%USERPROFILE%\Scripts` 里安装的副本，已经在运行的 Observer 会继续使用它启动时的版本。
+
+测试在 UTC 时区下运行（`vitest.config.ts`），因为部分测试把时钟固定在 UTC 午夜，而日志文件按本地日期命名。
+
+## 已知限制
+
+- **话题（thread）里的卡片按钮。** 在群里，话题内输入的命令属于该话题的 Lark scope，但在话题里点击的卡片按钮会解析为群的主聊天 scope。因此通过按钮完成的 handoff / use 会绑定到主聊天区。在话题里建议直接输入命令，或在主聊天区使用按钮。
+- **没有经过 `codex3` attach 的 Codex 会话**（在 attach 机制出现之前启动或手动启动）无法 handoff；请在 Windows 上退出后用 **Use in Lark**。
+- **Handoff 会终止 Windows 上的窗口。** 对话完整保存在磁盘上，但终端输入框里未发送的草稿会丢失。Claude 被强制退出后，终端在切换焦点时可能打印 `[I[` 之类的转义序列，关闭该标签页即可。
+- **一个 bot 只对应一种 agent。** 一个 profile 只运行 Codex 或 Claude Code，另一种请用它自己的 bot 管理。
+
 ## 文档
 
 - [本地文档索引](./local-docs/README.zh-CN.md)
 - [Codex 第三方 API Provider](./local-docs/01-codex-third-party-api-key.zh-CN.md)
-- [Lark / Bridge / Codex 架构](./local-docs/02-lark-bridge-codex-architecture.zh-CN.md)
+- [Lark / bridge / Codex / Claude Code 架构](./local-docs/02-lark-bridge-codex-architecture.zh-CN.md)
 - [Codex / Claude Code Session 管理](./local-docs/03-codex-session-management.zh-CN.md)
 
 ## 上游与致谢
